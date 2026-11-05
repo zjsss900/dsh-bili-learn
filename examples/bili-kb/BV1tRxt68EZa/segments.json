@@ -1,0 +1,44 @@
+[
+  {
+    "index": 0,
+    "start": 3,
+    "end": 320,
+    "chars": 769,
+    "terms": [
+      {
+        "term": "空间",
+        "count": 28
+      },
+      {
+        "term": "零空",
+        "count": 11
+      },
+      {
+        "term": "列空",
+        "count": 9
+      },
+      {
+        "term": "就是",
+        "count": 8
+      },
+      {
+        "term": "间的",
+        "count": 8
+      },
+      {
+        "term": "维数",
+        "count": 7
+      },
+      {
+        "term": "等于",
+        "count": 7
+      },
+      {
+        "term": "个数",
+        "count": 6
+      }
+    ],
+    "status": "unread",
+    "note": "输出被 maxTokens 截断，未能解析"
+  }
+]

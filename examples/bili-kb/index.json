@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "videos": {
+    "BV1tRxt68EZa": {
+      "bvid": "BV1tRxt68EZa",
+      "title": "线性代数 5分钟讲透：四个基本子空间，一张图看完整个线性代数",
+      "owner": "Hunterxblue",
+      "url": "https://www.bilibili.com/video/BV1tRxt68EZa",
+      "duration": 235,
+      "transcriptSource": "user-file",
+      "coverage": {
+        "lines": 21,
+        "seconds": 320,
+        "videoSeconds": 235,
+        "segments": 1,
+        "distilled": 0,
+        "unread": 1,
+        "loggedIn": false
+      },
+      "warnings": [
+        "模型没有产出任何卡片：讲稿已落盘，请自己读 transcript.md 并用 bili_note 写卡片。"
+      ],
+      "cards": 7,
+      "segments": 1,
+      "lines": 21,
+      "updatedAt": "2026-11-04T08:23:44.295Z"
+    }
+  }
+}
