@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Bilibili Study",
+    "description": "Reads Bilibili videos into timestamped knowledge cards, then recalls, reviews and applies them in later sessions."
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "@local/dsh-bili-learn",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "把 B 站视频读成带时间锚点的知识卡片，并在后续会话中检索、复习和应用。",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./lib/*": "./lib/*",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib/",
+    "locale/",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

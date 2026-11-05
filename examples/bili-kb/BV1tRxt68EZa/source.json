@@ -1,0 +1,42 @@
+{
+  "bvid": "BV1tRxt68EZa",
+  "aid": 117541762565832,
+  "cid": 43243536945,
+  "page": 1,
+  "part": "la_ep11",
+  "title": "线性代数 5分钟讲透：四个基本子空间，一张图看完整个线性代数",
+  "owner": "Hunterxblue",
+  "duration": 235,
+  "url": "https://www.bilibili.com/video/BV1tRxt68EZa",
+  "pubdate": 1793545250,
+  "stat": {
+    "view": 176,
+    "like": 3,
+    "favorite": 3
+  },
+  "tags": [
+    "线性代数",
+    "Strang",
+    "行空间",
+    "零空间",
+    "左零空间",
+    "四个基本子空间",
+    "数学科普",
+    "秩",
+    "MIT 18.06",
+    "列空间"
+  ],
+  "description": "【线性代数 · 5分钟讲透 · 第二季 E11】\n\n线性代数第二季第五集：四个基本子空间，一张图看完整个线性代数。列空间 C(A) 所有列的组合，住在输出空间 R^m，维数等于秩 r；零空间 N(A) 解 Ax=0，住在输入空间 R^n，维数 n-r；行空间 C(A^T) 所有行的组合，住在输入空间，维数 r；左零空间 N(A^T) 解 A^T y=0，住在输出空间，维数 m-r。两组正交：行空间垂直于零空间，列空间垂直于左零空间；两组维数相加正好是 n 和 m。用 3x3 例子 A=[[1,2,3],[2,4,7],[1,2,4]]，rank=2，四个维数 2、1、2、1；零空间向量 (-2,1,0) 与行 (1,2,3)、(2,4,7) 点乘均为零；左零空间向量 (-1,1,-1) 与两列 (1,2,1)、(3,7,4) 点乘均为零。三个坑：方阵四个维数都一样；行空间等于列空间；左零空间是零空间转过去。应用：最小二乘的误差落在左零空间、数据压缩的有效方向、网络流里的守恒与环路。思考题：3x4、rank=2 的矩阵，四个维数各是多少？下集：图与网络。\n\n上一集：https://www.bilibili.com/video/BV18axb6NEtQ\n\n黑板粉笔风动画，一集讲透一个线性代数话题。第二季从“解到底住在哪里”开始，按空间、正交、特征值、SVD 的顺序更新。",
+  "transcriptSource": "user-file",
+  "transcriptNote": "supplied by a local fixture file (path removed for publication)",
+  "coverage": {
+    "lines": 21,
+    "seconds": 320,
+    "videoSeconds": 235,
+    "segments": 1,
+    "distilled": 0,
+    "unread": 1,
+    "loggedIn": false
+  },
+  "learnedAt": "2026-11-04T08:09:12.312Z"
+}

@@ -1,0 +1,17 @@
+# 登录态与本机数据，绝不入库
+cookie.txt
+*bili-kb/
+!examples/bili-kb/
+!examples/bili-kb/**
+.out/
+*.log
+*.png
+
+# 依赖与构建
+node_modules/
+dist/
+*.tsbuildinfo
+
+# 系统
+.DS_Store
+Thumbs.db

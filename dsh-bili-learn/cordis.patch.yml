@@ -1,0 +1,36 @@
+- insert:
+    - id: bili-learn
+      name: '@local/dsh-bili-learn'
+      config:
+        # 知识库根目录；留空 = $DSH_HOME/bili-kb
+        kbDir: ''
+        # 浏览器里的整条 Cookie（或只填 SESSDATA）。B 站对匿名请求不下发字幕，
+        # 想自动读讲稿就必须登录态。
+        cookie: ''
+        # 更推荐：把 Cookie 写进这个文件（默认 <kbDir>/cookie.txt）。
+        # 插件每次调用都重读，换 Cookie 不必重启 DSH。
+        cookieFile: ''
+        # 或者让插件调用 yt-dlp 从浏览器读登录态，例如 chrome / edge / firefox。
+        # 实测：浏览器正在运行时 Cookie 数据库会被锁（PermissionError），要先完全退出浏览器。
+        cookiesFromBrowser: 'edge'
+        ytDlp: 'yt-dlp'
+        # 提取卡片用的模型：留空 = 当前会话默认模型（本机即本地 qwen）。
+        distill: true
+        distillProvider: ''
+        distillModel: ''
+        segmentMinutes: 8
+        maxCardsPerSegment: 5
+        # 本地思考型模型长输出会翻车：短输出 + 失败重试一次（重试会禁止思考并加倍预算）。
+        distillMaxTokens: 2500
+        # 0 = 整段视频都学；>0 只学前 N 分钟。
+        maxLearnMinutes: 0
+        # 把「已学会什么」的紧凑索引注入系统提示。
+        injectIndex: true
+        # 扫码登录二维码的渲染器（本地渲染，不把登录令牌交给第三方；缺了就只返回登录 URL）。
+        qrPython: 'python'
+        qrPng: ''
+        # 抽帧：留空则自动找 PATH 上的 ffmpeg，再退回 python 的 imageio-ffmpeg 自带二进制。
+        ffmpeg: ''
+        frameQuality: 32
+        # bili_skill 生成的技能写到这里（留空 = <kbDir>/../skills，即 ~/.dsh/skills）。
+        skillsDir: ''
