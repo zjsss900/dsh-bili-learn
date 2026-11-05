@@ -95,6 +95,8 @@ node tests/selftest.mjs   # PASS 24 checks   纯函数与知识库读写门禁
 node tests/tool-test.mjs  # PASS 9 tools     用假 ctx 驱动真实工具，验证输出无损
 ```
 
+CI 每次推送都跑第一个门禁；第二个会真的访问 B 站接口，数据中心 IP 可能被限流，因此允许失败（见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)）。版本记录在 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 隐私
 
 本仓库不含 Cookie、账号 ID、会话令牌或本机绝对路径。提交历史使用 GitHub noreply 邮箱。
