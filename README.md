@@ -95,6 +95,8 @@ node tests/selftest.mjs   # PASS 24 checks   pure functions and knowledge-base r
 node tests/tool-test.mjs  # PASS 9 tools     drives the real tools with a fake ctx, checks lossless output
 ```
 
+CI runs the first gate on every push; the second one touches the live Bilibili API, so it is allowed to fail on datacenter IPs (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Release notes live in [CHANGELOG.md](CHANGELOG.md).
+
 ## Privacy
 
 This repository contains no cookies, account IDs, session tokens or machine-specific absolute paths. Commit history uses a GitHub noreply address.
@@ -102,5 +104,4 @@ This repository contains no cookies, account IDs, session tokens or machine-spec
 
 ## License
 
-Code and documentation are licensed under [CC BY-NC 4.0](LICENSE) (attribution, non-commercial).
-Quotations of third-party videos inside cards and skills are **short excerpts with timestamps and back-links**; copyright of that underlying content stays with the respective uploaders. If you consider an excerpt out of bounds, open an issue and it will be removed after review.
+Code and documentation are licensed under [CC BY-NC 4.0](LICENSE) (attribution, non-commercial).Quotations of third-party videos inside cards and skills are **short excerpts with timestamps and back-links**; copyright of that underlying content stays with the respective uploaders. If you consider an excerpt out of bounds, open an issue and it will be removed after review.
