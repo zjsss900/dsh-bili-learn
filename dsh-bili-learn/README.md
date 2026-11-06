@@ -16,7 +16,7 @@
 
 ```bash
 # 在 DSH 里让 Agent 执行（需要 Full access 或批准）
-plugin_manager: action=install_bundle, target=E:\B站大学习插件\dsh-bili-learn
+plugin_manager: action=install_bundle, target=<本地路径>/dsh-bili-learn
 ```
 
 或手动把目录放进 profile 后 `pnpm install`（推荐用 `install_bundle`，它会处理 patch 层与依赖）。
@@ -70,6 +70,7 @@ ffmpeg 从哪来：config 的 `ffmpeg` → PATH 上的 `ffmpeg` → `pip install
 |---|---|
 | `bili_search` | 搜候选视频（匿名可用） |
 | `bili_learn` | 抓讲稿 → 分段 → 提取卡片 → 落盘 |
+| `bili_series` | 同一 UP 主的系列教程：`find`/`list`/`next`/`learn`/`cluster` |
 | `bili_recall` | 检索已学会的卡片与讲稿证据（带时间戳、回跳链接） |
 | `bili_note` | 由模型/用户手写卡片，覆盖同 id |
 | `bili_practice` | `due` 取待复习卡片；`grade` 记录 ok/miss，驱动间隔复习 |
@@ -80,11 +81,38 @@ ffmpeg 从哪来：config 的 `ffmpeg` → PATH 上的 `ffmpeg` → `pip install
 
 同时注册技能 `bili-study`（教 AI 怎么跑完整闭环）。
 
+## 按系列学：同一 UP 主的同一系列教程
+
+教程一旦是合集，逐集手动喂链接就很蠢。`bili_series` 让 AI 自己顺着合集往下学。
+
+```jsonc
+// 1) 给系列里任意一集，反查它所属的合集，列出全部集数 + 已学/未学
+{ "action": "find", "url": "BV1uuHy6hEfe" }
+// → key=season:1234567「MiniMax-H3系列」total=22｜learned=1｜missing=21｜next=#1 …
+
+// 2) 按合集顺序连学（默认 3 集，limit 最多 10；已学的自动跳过）
+{ "action": "learn", "url": "BV1uuHy6hEfe", "limit": 3, "max_minutes": 0 }
+
+// 3) 想知道这个 UP 主还有哪些合集
+{ "action": "list", "mid": 123456789 }
+
+// 4) 稿件不在任何合集里时的兜底：按标题前缀聚组
+{ "action": "cluster", "keyword": "MiniMax H3 打斗", "owner": "某UP主" }
+```
+
+要点（都是实测）：
+
+- `view` 返回的 `ugc_season.sections[].archives` 现在是 `undefined`，合集内容必须走 `seasons_archives_list`（分页、保留合集自身顺序，`index` 从 1 开始）。
+- 已学状态不另存一份：`index.series[key].episodes` 只存清单，学没学按 `index.videos` 现算，避免两处真相。
+- 按系列学的稿件会带 `series` 标记，于是 `bili_recall` 可以 `{"series":"season:1234567"}` 限定检索，`bili_skill` 可以 `{"series":"season:1234567"}` 一次把整个系列出成一个技能。
+- `bili_status` 会列出每个系列的 `learned/total` 与下一集；注入的系统提示里也带这行，新会话直接知道还差几集。
+- `cluster` 只是启发式兜底（去掉【】、括号、集数编号后按前缀聚组），真合集优先。
+
 ## 知识库产物
 
 ```
 $DSH_HOME/bili-kb/
-  index.json                 # 视频索引
+  index.json                 # 视频索引 + 系列清单（series[key].episodes）
   BVxxxxxxxx/
     source.json              # 元数据 + 覆盖度 + 字幕来源
     transcript.json / .md    # 带时间锚点的讲稿

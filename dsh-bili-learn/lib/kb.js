@@ -35,7 +35,7 @@ export class KnowledgeBase {
   ensure() {
     fs.mkdirSync(this.root, { recursive: true });
     const index = path.join(this.root, 'index.json');
-    if (!fs.existsSync(index)) writeJsonAtomic(index, { version: INDEX_VERSION, videos: {} });
+    if (!fs.existsSync(index)) writeJsonAtomic(index, { version: INDEX_VERSION, videos: {}, series: {} });
     return index;
   }
 
@@ -44,7 +44,7 @@ export class KnowledgeBase {
   }
 
   readIndex() {
-    return readJsonSafe(path.join(this.root, 'index.json'), { version: INDEX_VERSION, videos: {} });
+    return readJsonSafe(path.join(this.root, 'index.json'), { version: INDEX_VERSION, videos: {}, series: {} });
   }
 
   listVideos() {
@@ -57,6 +57,68 @@ export class KnowledgeBase {
     index.videos = index.videos ?? {};
     index.videos[meta.bvid] = { ...(index.videos[meta.bvid] ?? {}), ...meta, ...counts, updatedAt: new Date().toISOString() };
     writeJsonAtomic(path.join(this.root, 'index.json'), index);
+  }
+
+  // ------------------------------------------------------------ 系列（合集 / 系列）
+
+  /** 落盘一个系列的稿件清单。已学状态不写在这里，按 index.videos 现算，避免两处真相。 */
+  saveSeries(series, episodes) {
+    this.ensure();
+    const index = this.readIndex();
+    index.series = index.series ?? {};
+    const key = series.key;
+    const prev = index.series[key] ?? {};
+    index.series[key] = {
+      ...prev,
+      key,
+      kind: series.kind ?? prev.kind ?? 'season',
+      season_id: series.season_id ?? prev.season_id ?? 0,
+      series_id: series.series_id ?? prev.series_id ?? 0,
+      title: series.title ?? prev.title ?? '',
+      raw_title: series.raw_title ?? prev.raw_title ?? '',
+      mid: series.mid ?? prev.mid ?? 0,
+      owner: series.owner ?? prev.owner ?? '',
+      cover: series.cover ?? prev.cover ?? '',
+      total: series.total ?? episodes?.length ?? prev.total ?? 0,
+      episodes: episodes ?? prev.episodes ?? [],
+      updatedAt: new Date().toISOString(),
+    };
+    writeJsonAtomic(path.join(this.root, 'index.json'), index);
+    return index.series[key];
+  }
+
+  readSeries() {
+    return this.readIndex().series ?? {};
+  }
+
+  getSeries(key) {
+    return this.readSeries()[key];
+  }
+
+  /** 系列学习进度：已学的、未学的、下一集。 */
+  seriesProgress(key) {
+    const series = this.getSeries(key);
+    if (!series) return undefined;
+    const index = this.readIndex();
+    const episodes = series.episodes ?? [];
+    const learned = [];
+    const missing = [];
+    for (const ep of episodes) {
+      const entry = index.videos?.[ep.bvid];
+      if (entry) learned.push({ bvid: ep.bvid, index: ep.index, title: ep.title, cards: entry.cards ?? 0, segments: entry.segments ?? 0, coverage: entry.coverage });
+      else missing.push(ep);
+    }
+    return { series, total: episodes.length, learned, missing, next: missing[0] ?? null };
+  }
+
+  /** 给稿件打系列标记（按系列学习时写入，方便按系列检索与出技能）。 */
+  tagVideoSeries(bvid, ref) {
+    const index = this.readIndex();
+    const video = index.videos?.[bvid];
+    if (!video) return false;
+    video.series = ref;
+    writeJsonAtomic(path.join(this.root, 'index.json'), index);
+    return true;
   }
 
   load(bvid) {
@@ -122,6 +184,9 @@ export class KnowledgeBase {
       },
       { cards: cards.length, segments: segments.length, lines: lines.length },
     );
+    if (meta.series?.key) {
+      this.tagVideoSeries(meta.bvid, { key: meta.series.key, index: meta.series.index ?? 0, total: meta.series.total ?? 0, title: meta.series.title ?? '' });
+    }
     return dir;
   }
 
@@ -194,10 +259,13 @@ export class KnowledgeBase {
       .slice(0, limit);
   }
 
-  search(query, { bvid, limit = 8, withLines = true } = {}) {
+  search(query, { bvid, series, limit = 8, withLines = true } = {}) {
     const tokens = tokenize(query);
     if (tokens.length === 0) return { cards: [], lines: [] };
-    const videos = bvid ? [bvid] : this.listVideos().map((v) => v.bvid);
+    let videos;
+    if (bvid) videos = [bvid];
+    else if (series) videos = (this.seriesProgress(series)?.learned ?? []).map((v) => v.bvid);
+    else videos = this.listVideos().map((v) => v.bvid);
     const cardHits = [];
     const lineHits = [];
     for (const id of videos) {
@@ -233,7 +301,23 @@ export class KnowledgeBase {
         if (!state || (state.due && Date.parse(state.due) <= now)) due += 1;
       }
     }
-    return { root: this.root, videos: videos.length, cards, mastered, due, list: videos.map((v) => ({ bvid: v.bvid, title: v.title, cards: v.cards ?? 0, source: v.transcriptSource, warnings: (v.warnings ?? []).length })) };
+    const series = Object.keys(this.readSeries())
+      .map((key) => {
+        const progress = this.seriesProgress(key);
+        const s = progress?.series ?? {};
+        return {
+          key,
+          title: s.title ?? '',
+          kind: s.kind ?? 'season',
+          owner: s.owner ?? '',
+          total: progress?.total ?? 0,
+          learned: progress?.learned.length ?? 0,
+          missing: progress?.missing.length ?? 0,
+          next: progress?.next?.title ?? '',
+        };
+      })
+      .sort((a, b) => b.total - a.total);
+    return { root: this.root, videos: videos.length, cards, mastered, due, series, list: videos.map((v) => ({ bvid: v.bvid, title: v.title, cards: v.cards ?? 0, series: v.series?.key ?? '', source: v.transcriptSource, warnings: (v.warnings ?? []).length })) };
   }
 }
 

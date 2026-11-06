@@ -5,7 +5,9 @@ import fs from 'node:fs';
 
 const root = new URL('../dsh-bili-learn/', import.meta.url).href;
 const failures = [];
+let total = 0;
 const check = (name, fn) => {
+  total += 1;
   try {
     const result = fn();
     if (result !== true) failures.push(`${name}: ${result}`);
@@ -19,6 +21,7 @@ const kbMod = await import(root + 'lib/kb.js');
 const distill = await import(root + 'lib/distill.js');
 const subs = await import(root + 'lib/subs.js');
 const bili = await import(root + 'lib/bili.js');
+const seriesMod = await import(root + 'lib/series.js');
 const entry = await import(root + 'index.js');
 
 check('entry exports apply', () => typeof entry.apply === 'function');
@@ -113,5 +116,66 @@ check('distill happy path', () => (okRun.cards.length === 1 && okRun.cards[0].ti
 const emptyRun = await distill.distillSegments({ llm: emptyLlm, provider: 'x', model: 'y', meta: { title: 't' }, segments: [fakeSegment], maxCardsPerSegment: 5, maxTokens: 100 });
 check('distill honest unread on empty content', () => (emptyRun.cards.length === 0 && emptyRun.segmentReports[0].status === 'unread' && /思考/.test(emptyRun.segmentReports[0].note)) || JSON.stringify(emptyRun.segmentReports));
 
-console.log(failures.length === 0 ? `PASS ${24} checks` : `FAIL ${failures.length}\n- ${failures.join('\n- ')}`);
+// ---------------------------------------------------------------- 系列（合集）：fixture，不联网
+const viewFix = {
+  bvid: 'BV1SERIES0001',
+  owner: { mid: 123456789, name: '某UP' },
+  ugc_season: { id: 1234567, title: 'MiniMax-H3系列', mid: 123456789, sections: [{ title: '正片' }] },
+};
+const ep = (i) => ({ aid: 100 + i, bvid: `BV1SERIES000${i}`, title: `H3 打斗精讲 第${i}集`, duration: 600 + i, pubdate: 1700000000 + i * 86400, pic: '' });
+const page1 = { archives: [ep(1), ep(2), ep(3)], page: { total: 4 } };
+const page2 = { archives: [ep(4)], page: { total: 4 } };
+const listFix = {
+  items_lists: {
+    seasons_list: [{ meta: { season_id: 1234567, name: '合集·MiniMax-H3系列', total: 4 } }],
+    series_list: [{ meta: { series_id: 777, name: '系列·杂项', total: 2 } }],
+  },
+  page: { total: 2 },
+};
+let fetchedPage = 0;
+const fakeBili = {
+  async fetchJson(url) {
+    if (url.includes('/view?')) return viewFix;
+    if (url.includes('seasons_archives_list')) { fetchedPage += 1; return fetchedPage === 1 ? page1 : page2; }
+    if (url.includes('seasons_series_list')) return listFix;
+    throw new Error(`unexpected url ${url}`);
+  },
+};
+
+const season = await seriesMod.seasonOfVideo(fakeBili, 'BV1SERIES0001');
+check('seasonOfVideo key/title/mid', () => (season.key === 'season:1234567' && season.title === 'MiniMax-H3系列' && season.mid === 123456789) || JSON.stringify(season));
+const { episodes, total: seasonTotal } = await seriesMod.seasonArchives(fakeBili, { mid: 123456789, season_id: 1234567 });
+check('seasonArchives paginates to total', () => (episodes.length === 4 && seasonTotal === 4) || `eps=${episodes.length} total=${seasonTotal}`);
+check('seasonArchives keeps collection order with 1-based index', () => (episodes[0].bvid === 'BV1SERIES0001' && episodes[3].index === 4) || episodes.map((e) => e.index).join(','));
+const collections = await seriesMod.listCollections(fakeBili, 123456789);
+check('listCollections covers seasons and series', () => (collections.length === 2 && collections[0].key === 'season:1234567' && collections[1].key === 'series:777') || JSON.stringify(collections.map((c) => c.key)));
+check('listCollections strips 合集· prefix but keeps raw', () => (collections[0].title === 'MiniMax-H3系列' && collections[0].raw_title === '合集·MiniMax-H3系列') || JSON.stringify(collections[0]));
+check('normalizeTitle keeps H3 but drops 第N集', () => seriesMod.normalizeTitle('H3 打斗精讲 第1集') === 'h3打斗精讲' || seriesMod.normalizeTitle('H3 打斗精讲 第1集'));
+const clusters = seriesMod.clusterByPrefix([
+  { bvid: 'a', title: 'H3 打斗精讲 第1集' }, { bvid: 'b', title: 'H3 打斗精讲 第2集' }, { bvid: 'c', title: 'H3 打斗精讲（上）第3集' }, { bvid: 'd', title: '完全不同的视频' },
+], { min: 3 });
+check('clusterByPrefix groups same-series titles', () => (clusters.length === 1 && clusters[0].count === 3 && clusters[0].bvids.join(',') === 'a,b,c') || JSON.stringify(clusters));
+
+kb.saveSeries({ ...season, total: 4 }, episodes);
+check('series saved', () => kb.getSeries('season:1234567')?.episodes.length === 4);
+let progress = kb.seriesProgress('season:1234567');
+check('progress: nothing learned, next is ep1', () => (progress.learned.length === 0 && progress.missing.length === 4 && progress.next.bvid === 'BV1SERIES0001') || JSON.stringify(progress.next));
+const seriesMeta = { ...meta, bvid: 'BV1SERIES0001', title: 'H3 打斗精讲 第1集', series: { key: 'season:1234567', index: 1, total: 4, title: 'MiniMax-H3系列' } };
+kb.saveVideo({ meta: seriesMeta, lines: lines.slice(0, 10), segments: segs.slice(0, 1), cards: [], warnings: [] });
+progress = kb.seriesProgress('season:1234567');
+check('progress after learning ep1', () => (progress.learned.length === 1 && progress.missing.length === 3 && progress.next.bvid === 'BV1SERIES0002') || JSON.stringify({ l: progress.learned.length, m: progress.missing.length, n: progress.next?.bvid }));
+check('video tagged with series', () => kb.listVideos().find((v) => v.bvid === 'BV1SERIES0001')?.series?.key === 'season:1234567');
+check('search scoped to series finds its card', () => {
+  kb.saveCards('BV1SERIES0001', [{ id: 's1', title: '起手式', claim: '先定景别再谈运镜', evidence: [{ t: 30, quote: '先定景别' }], tags: ['景别'], confidence: 'high' }]);
+  const inSeries = kb.search('景别', { series: 'season:1234567' });
+  const otherSeries = kb.search('景别', { series: 'season:0000' });
+  return (inSeries.cards.length >= 1 && otherSeries.cards.length === 0) || `in=${inSeries.cards.length} out=${otherSeries.cards.length}`;
+});
+check('stats lists series progress', () => {
+  const stats = kb.stats();
+  const row = stats.series.find((s) => s.key === 'season:1234567');
+  return (row && row.total === 4 && row.learned === 1 && row.missing === 3) || JSON.stringify(stats.series);
+});
+
+console.log(failures.length === 0 ? `PASS ${total} checks` : `FAIL ${failures.length}/${total}\n- ${failures.join('\n- ')}`);
 process.exit(failures.length === 0 ? 0 : 1);

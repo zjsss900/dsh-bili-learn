@@ -20,12 +20,13 @@
 | 知识散落，无法复用 | `bili_skill` 把若干视频的知识拼成 `SKILL.md` 技能，每条规则挂回跳链接 |
 | 只有某个模型能用 | 提取卡片用哪个模型是可配的（默认当前会话模型，可指向本地模型），不绑定任何厂商 |
 
-## 9 个工具
+## 10 个工具
 
 | 工具 | 作用 |
 |---|---|
 | `bili_search` | 搜候选视频（标题、UP 主、时长、播放量），用来决定学哪个 |
 | `bili_learn` | 抓元数据与字幕 → 分段 → 提取知识卡片，写入本地知识库 |
+| `bili_series` | 同一 UP 主的同一系列教程：`find` / `list` / `next` / `learn` / `cluster` |
 | `bili_recall` | 在已学知识里检索卡片与讲稿证据（返回时间戳与回跳链接） |
 | `bili_practice` | 复习闭环：`due` 列出待复习卡片，`grade` 记录 ok/miss 并更新熟练度与下次复习时间 |
 | `bili_note` | 由你自己写卡片覆盖自动提取结果（必须带 `evidence` 时间戳） |
@@ -33,6 +34,33 @@
 | `bili_login` | 扫码登录：出二维码 → 轮询 → 把会话 Cookie 写进 `cookieFile` |
 | `bili_frame` | 按秒抽帧存本地图片，配合视觉模型读画面上的文字与界面 |
 | `bili_skill` | 把已学知识组装成技能 `SKILL.md`（带 frontmatter、分组正文、每条挂证据链接） |
+
+## 按系列学：同一 UP 主的同一系列教程
+
+教程很少只有一个视频。合集一旦存在，逐集手动喂链接就很蠢——`bili_series` 让 AI 自己顺着合集往下学。
+
+```jsonc
+// 1) 给系列里任意一集 → 反查它所属的合集，列出全部集数并标出已学/未学
+{ "action": "find", "url": "BVxxxxxxxxxx" }
+// → key=season:1234567，total=22，learned=1，missing=21，next=#1 …
+
+// 2) 按合集顺序连学（默认 3 集，上限 10；已学的自动跳过）
+{ "action": "learn", "url": "BVxxxxxxxxxx", "limit": 3 }
+
+// 3) 这个 UP 主还有哪些合集/系列
+{ "action": "list", "mid": 123456789 }
+
+// 4) 稿件不在任何合集时的兜底：按标题前缀聚组
+{ "action": "cluster", "keyword": "某个教程", "owner": "某个UP主" }
+```
+
+写进实现里的实测事实：
+
+- `view` 返回的 `ugc_season.sections[].archives` 现在是 `undefined`，合集内容必须走 `seasons_archives_list`（分页、保留合集自身顺序，`index` 从 1 开始）。
+- 已学状态不另存一份：`index.series[key].episodes` 只存清单，学没学按 `index.videos` 现算，避免两处真相。
+- 按系列学的稿件会带 `series` 标记，于是 `bili_recall` 可以用 `{"series":"season:1234567"}` 限定检索，`bili_skill` 可以用 `{"series":"season:1234567"}` 把整个系列一次出成一个技能。
+- `bili_status` 会列出每个系列的 `learned/total` 与下一集；注入到系统提示里的索引也带这行，新会话一上来就知道还差几集。
+- `cluster` 只是启发式兜底（去掉【】、括号、集数编号后按标题前缀聚组），有真合集时优先用真合集。
 
 ## 安装
 
@@ -91,8 +119,8 @@ examples/bili-kb/BV1tRxt68EZa/
 ## 测试
 
 ```bash
-node tests/selftest.mjs   # PASS 24 checks   纯函数与知识库读写门禁
-node tests/tool-test.mjs  # PASS 9 tools     用假 ctx 驱动真实工具，验证输出无损
+node tests/selftest.mjs   # PASS 39 checks   纯函数与知识库读写门禁（含系列进度）
+node tests/tool-test.mjs  # PASS 10 tools    用假 ctx 驱动真实工具，验证输出无损
 ```
 
 CI 每次推送都跑第一个门禁；第二个会真的访问 B 站接口，数据中心 IP 可能被限流，因此允许失败（见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)）。版本记录在 [CHANGELOG.md](CHANGELOG.md)。

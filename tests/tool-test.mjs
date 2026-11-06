@@ -21,11 +21,14 @@ const cleanup = entry.apply(ctx, { kbDir, cookie: '', distill: false, skillsDir:
 const failures = [];
 const check = (name, condition, detail = '') => { if (condition !== true) failures.push(`${name}: ${condition}${detail ? ` | ${detail}` : ''}`); };
 
-check('registered 9 tools', Object.keys(tools).length === 9, Object.keys(tools).join(','));
+check('registered 10 tools', Object.keys(tools).length === 10, Object.keys(tools).join(','));
 check('all tools have output.render', Object.values(tools).every((t) => typeof t.output?.render === 'function'));
 check('all tools have object output schema', Object.values(tools).every((t) => t.output?.schema?.type === 'object'));
 check('skill registered', skills.length === 1 && skills[0].name === 'bili-study');
 check('prompt section registered', sections.length === 1 && sections[0].name === 'bili-learn:index');
+check('bili_series has 5 actions', JSON.stringify(tools.bili_series?.parameters?.properties?.action?.enum) === '["find","list","next","learn","cluster"]', JSON.stringify(tools.bili_series?.parameters?.properties?.action?.enum));
+check('bili_skill can take series instead of bvids', !tools.bili_skill?.parameters?.required?.includes('bvids') && Boolean(tools.bili_skill?.parameters?.properties?.series), JSON.stringify(tools.bili_skill?.parameters?.required));
+check('bili_recall has series filter', Boolean(tools.bili_recall?.parameters?.properties?.series));
 
 const lossless = (value) => {
   const walk = (v, p) => {
@@ -61,7 +64,7 @@ const statusCookie = await run('bili_status', {});
 check('status reads cookie file without restart', statusCookie?.config?.cookie === '已配置（含 SESSDATA）', statusCookie?.config?.cookie);
 fs.rmSync(path.join(kbDir, 'cookie.txt'));
 
-const fixture = fs.readFileSync('E:/B站大学习插件/.fixtures/linear-algebra-rank.txt', 'utf8');
+const fixture = fs.readFileSync(new URL('./fixtures/linear-algebra-rank.txt', import.meta.url), 'utf8');
 const learned = await run('bili_learn', { url: 'BV1tRxt68EZa', transcript_text: fixture, distill: false });
 check('learn wrote 1 segment', learned?.coverage?.segments === 1, JSON.stringify(learned?.coverage));
 check('learn marks pending (distill off)', learned?.coverage?.unread === 0 && learned?.cards === 0);
@@ -113,6 +116,8 @@ check('status counts card and 2 videos', status2?.cards === 1 && status2?.videos
 
 const sectionText = sections[0].text({});
 check('prompt section mentions kb', sectionText.includes('bili_recall') && sectionText.includes('BV1tRxt68EZa'), sectionText.slice(0, 120));
+check('prompt section mentions series learning', sectionText.includes('bili_series'), sectionText.slice(-160));
+check('skill body mentions bili_series', String(skills[0]?.content ?? '').includes('bili_series'), String(skills[0]?.content ?? '').slice(0, 80));
 
 // 错误路径要给出可读错误，而不是崩栈
 for (const [name, args, expect] of [['bili_note', { bvid: 'BV0NOPE00000', cards: [] }, '知识库里没有'], ['bili_practice', { action: 'grade', results: [] }, '需要 bvid'], ['bili_frame', { url: 'BV0NOPE00000', times: [1] }, '-400']]) {

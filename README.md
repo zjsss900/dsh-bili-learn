@@ -20,12 +20,13 @@ The difference in one line: a summary loses the evidence; here every claim carri
 | Knowledge stays scattered and un-reusable | `bili_skill` compiles several videos' cards into a `SKILL.md`, every rule linked back to its source |
 | Locked to one vendor's model | The card-extraction model is configurable (defaults to the current session model; can point at a fully local model) |
 
-## The 9 tools
+## The 10 tools
 
 | Tool | Purpose |
 |---|---|
 | `bili_search` | Search candidate videos (title, uploader, duration, view count) to decide what to learn |
 | `bili_learn` | Fetch metadata + subtitles → segment → extract knowledge cards into the local knowledge base |
+| `bili_series` | Same uploader, same tutorial series: `find` / `list` / `next` / `learn` / `cluster` |
 | `bili_recall` | Search what you already learned; returns cards and transcript evidence with timestamps and jump-back links |
 | `bili_practice` | Review loop: `due` lists cards due, `grade` records ok/miss and updates mastery plus the next review time |
 | `bili_note` | Write your own cards to override automatic extraction (`evidence` timestamps required) |
@@ -33,6 +34,33 @@ The difference in one line: a summary loses the evidence; here every claim carri
 | `bili_login` | QR login: render QR → poll → write the session cookie into `cookieFile` |
 | `bili_frame` | Extract frames at specific seconds to local images, for reading on-screen text with a vision model |
 | `bili_skill` | Assemble learned knowledge into a `SKILL.md` skill (frontmatter, grouped body, every rule carrying an evidence link) |
+
+## Learning a whole series (same uploader, same collection)
+
+Tutorials rarely arrive as a single video. `bili_series` lets the agent walk the collection itself instead of you pasting links one by one.
+
+```jsonc
+// 1) give any episode → find the collection it belongs to, list every episode, mark learned / unlearned
+{ "action": "find", "url": "BVxxxxxxxxxx" }
+// → key=season:1234567, total=22, learned=1, missing=21, next=#1 …
+
+// 2) learn the next episodes in collection order (default 3, max 10; already-learned ones are skipped)
+{ "action": "learn", "url": "BVxxxxxxxxxx", "limit": 3 }
+
+// 3) what else does this uploader have?
+{ "action": "list", "mid": 123456789 }
+
+// 4) fallback when the video is not in any collection: cluster by title prefix
+{ "action": "cluster", "keyword": "some tutorial", "owner": "some-uploader" }
+```
+
+Measured facts baked into the implementation:
+
+- `view` no longer returns `ugc_season.sections[].archives` — it comes back `undefined`. Collection contents must come from `seasons_archives_list`, which is paginated and preserves the collection's own order (`index` starts at 1).
+- Learned state is never duplicated: `index.series[key].episodes` stores only the episode list; whether an episode is learned is computed from `index.videos`.
+- Episodes learned through a series carry a `series` tag, so `bili_recall` can be scoped with `{"series":"season:1234567"}` and `bili_skill` can compile the whole series into one skill with `{"series":"season:1234567"}`.
+- `bili_status` reports `learned/total` and the next episode for every series; the injected system-prompt index carries the same line, so a fresh session already knows what is still missing.
+- `cluster` is a heuristic fallback only (it strips 【】 brackets, parentheses and episode numbers, then groups by title prefix). A real collection always wins.
 
 ## Install
 
@@ -91,8 +119,8 @@ examples/bili-kb/BV1tRxt68EZa/
 ## Tests
 
 ```bash
-node tests/selftest.mjs   # PASS 24 checks   pure functions and knowledge-base read/write gates
-node tests/tool-test.mjs  # PASS 9 tools     drives the real tools with a fake ctx, checks lossless output
+node tests/selftest.mjs   # PASS 39 checks   pure functions and knowledge-base read/write gates (incl. series progress)
+node tests/tool-test.mjs  # PASS 10 tools    drives the real tools with a fake ctx, checks lossless output
 ```
 
 CI runs the first gate on every push; the second one touches the live Bilibili API, so it is allowed to fail on datacenter IPs (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Release notes live in [CHANGELOG.md](CHANGELOG.md).
