@@ -3,6 +3,30 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-11-07
+
+### 新增 / Added
+
+- **`bili_series`：同一 UP 主的同一系列教程** — `find` 反查合集并列出全部集数与已学/未学；`list` 列该 UP 主的全部合集与系列；`next` 取下一集未学的；`learn` 按合集顺序连学（默认 3 集、上限 10、已学自动跳过）；`cluster` 在稿件不属于任何合集时按标题前缀聚组
+  / Series learning for one uploader: find / list / next / learn / cluster
+- **系列进度** — `index.series[key].episodes` 只存清单，已学状态按 `index.videos` 现算（避免两处真相）；`bili_status` 与注入到系统提示的索引都带 `learned/total` 与下一集
+  / Series progress derived from a single source of truth
+- **按系列检索与出技能** — `bili_recall` 与 `bili_skill` 接受 `series`，整个系列可以一次组装成一个技能
+  / Series-scoped recall and one skill per series
+- **门禁 / Gates** — `tests/selftest.mjs` 增至 39 项（新增系列 fixture 用例，不联网），`tests/tool-test.mjs` 覆盖 10 个工具
+
+### 修复 / Fixed
+
+- `tests/tool-test.mjs` 残留的本机绝对路径改为仓库内 `tests/fixtures/linear-algebra-rank.txt`
+  / A leftover machine-absolute fixture path now lives in the repo
+- 文档与参数示例里出现的真实合集 ID / UID / UP 主名已匿名化
+  / Real collection IDs, UIDs and uploader names in docs anonymized
+
+### 实测事实 / Measured facts
+
+- `view` 不再返回 `ugc_season.sections[].archives`（实测为 `undefined`）；合集清单必须走 `seasons_archives_list`（分页、保留合集自身顺序）
+  / Collection contents must come from `seasons_archives_list`; `view` omits the archive list now
+
 ## [0.1.0] - 2026-11-05
 
 ### 新增 / Added

@@ -13,6 +13,7 @@ import { distillSegments } from './lib/distill.js';
 import { grabFrame, playurlMp4, resolveFfmpeg } from './lib/frames.js';
 import { buildSkill, slugify, writeSkill } from './lib/skill.js';
 import { pollQrLogin, renderQrPng, startQrLogin, whoami, writeCookieFile } from './lib/login.js';
+import { clusterByPrefix, collectionEpisodes, listCollections, seasonOfVideo } from './lib/series.js';
 import { fetchSubtitlesWithYtDlp, parseSubtitleFile } from './lib/subs.js';
 import { clip, formatTime, parseTranscriptText, segmentTranscript, topTerms } from './lib/text.js';
 
@@ -62,7 +63,8 @@ const SKILL_BODY = `# B 站视频学习闭环（dsh-bili-learn）
 1. 用户给出视频链接 → \`bili_learn\`。看返回里的 \`coverage\` 与 \`warnings\`：
    - 报「没有字幕/匿名拿不到字幕」→ 调 \`bili_login\` 让用户扫码，Cookie 会写进 cookieFile，之后重跑即可；不要凭空编造内容。
    - 用户手上有文稿 → 直接传 \`transcript_path\` / \`transcript_text\`。
-2. **画面比字幕多信息**：讲稿里出现「看这个画面 / 如图所示 / 参数如下 / 核心提示词：…」，或卡片涉及界面操作、参数、对比效果时，用 \`bili_frame\` 按 evidence 的秒数抽帧，再 \`read_image\` 看。实测教程视频会把提示词原文、参数、UI 只画在画面上，语音字幕里没有。
+2. **同一 UP 主的系列教程**：给系列里任意一集跑 \`bili_series\`（action=find）→ 拿到合集标题、全部集数、已学/未学；再 action=learn 按顺序连学（默认 3 集，用 limit 调）。稿件不在任何合集时 action=cluster 按标题前缀聚组。整个系列学完后 \`bili_skill\` 传 \`series\` 一次出技能。
+3. **画面比字幕多信息**：讲稿里出现「看这个画面 / 如图所示 / 参数如下 / 核心提示词：…」，或卡片涉及界面操作、参数、对比效果时，用 \`bili_frame\` 按 evidence 的秒数抽帧，再 \`read_image\` 看。实测教程视频会把提示词原文、参数、UI 只画在画面上，语音字幕里没有。
 3. 提取完成后，**自己复核卡片**：读 \`cards.md\`，对照 \`transcript.md\` 的时间锚点，用 \`bili_note\` 修正含糊、错误或缺失的卡片（模型自己写的卡片比自动提取更可靠）。发现整片字幕与主题无关（如无旁白的效果展示片）→ 用 \`bili_note\` 的 \`replace: true\` 换成诚实的说明卡。
 4. 用 \`bili_practice\`（action=due）取待复习卡片，逐张自测：先不看答案复述「结论/为什么/怎么做」，再用 action=grade 记录 ok/miss。
 5. 想把知识变成可复用能力：\`bili_skill\` 把若干视频的卡片组装成 SKILL.md（写进技能目录，每条挂回跳链接），然后**读一遍并精修**措辞、合并重复、补上与其他技能的分工。技能需要重启或新会话才会出现在技能列表。
@@ -189,6 +191,13 @@ export function apply(ctx, config) {
       timeoutMs: 3600000,
       isConcurrencySafe: () => false,
       async execute(args, exec) {
+        return learnOne(args, exec);
+      },
+    }),
+  );
+
+  /** bili_learn 的完整管线；bili_series 按系列连学时复用同一个函数，避免两套真相。 */
+  async function learnOne(args, exec) {
         const warnings = [];
         const bili = client();
         const ref = parseVideoRef(args.url);
@@ -274,6 +283,8 @@ export function apply(ctx, config) {
           stat: meta.stat,
           tags: await bili.tags(meta.bvid, { signal: exec.signal }),
           description: clip(meta.description, 2000),
+          // 按系列学习时带上系列标记（bili_recall / bili_skill 可按系列聚合）。
+          series: args.series ?? undefined,
           transcriptSource: sourceKind,
           transcriptNote: sourceNote,
           coverage: {
@@ -312,6 +323,172 @@ export function apply(ctx, config) {
               ? '读 transcript.md 后用 bili_note 写卡片。'
               : '补齐字幕来源：插件 config 填 cookie，或提供 transcript_path。',
         };
+  }
+
+  disposers.push(
+    ctx.tools.register({
+      name: 'bili_series',
+      description:
+        '按「同一 UP 主的同一系列教程」学习。find：给系列里任一稿件，找出它所属的合集/系列，列出全部集数并标出已学/未学；list：列一个 UP 主的所有合集与系列；next：取下一集未学的；learn：按顺序连学 N 集（复用 bili_learn 的管线，卡片自动带系列标记）；cluster：稿件不在任何合集时，按标题前缀把同一 UP 主的稿件聚成候选系列。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', enum: ['find', 'list', 'next', 'learn', 'cluster'] },
+          url: { type: 'string', description: 'find/next/learn 用：系列里任一稿件的链接或 BV 号' },
+          key: { type: 'string', description: '系列标识，如 season:1234567（find 返回的 key）' },
+          mid: { type: 'integer', description: 'UP 主 mid（list 用；只给 url 时会自动查）' },
+          keyword: { type: 'string', description: 'cluster 用：搜索关键词（通常就是系列名）' },
+          owner: { type: 'string', description: 'cluster 用：只保留这个 UP 主的稿件' },
+          limit: { type: 'integer', description: 'learn 最多连学几集（默认 3，上限 10）' },
+          max_minutes: { type: 'integer', description: '每集只学前 N 分钟（0=全部）' },
+          distill: { type: 'boolean', description: '是否调用模型提取卡片' },
+          force: { type: 'boolean', description: '已学过的也重学' },
+          refresh: { type: 'boolean', description: '是否重新拉取合集清单（默认 true）' },
+        },
+        required: ['action'],
+      },
+      output: { schema: { type: 'object' }, render: (_args, value) => TOOL_TEXT(value) },
+      timeoutMs: 3600000,
+      isConcurrencySafe: () => false,
+      async execute(args, exec) {
+        const bili = client();
+        const action = String(args.action ?? 'find');
+
+        // 系列定位：优先用 key（知识库里已存），否则从任一稿件反查合集。
+        async function resolveCollection() {
+          if (args.key) {
+            const stored = kb.getSeries(args.key);
+            if (stored) return stored;
+            throw new Error(`知识库里没有系列 ${args.key}。先 action=find 给一集稿件，或 action=list 列 UP 主的合集。`);
+          }
+          if (!args.url) throw new Error('需要 url（系列里任一稿件）或 key（如 season:1234567）');
+          const ref = parseVideoRef(args.url);
+          const season = await seasonOfVideo(bili, ref.bvid, { signal: exec.signal });
+          if (season) return season;
+          const meta = await bili.view(ref, { signal: exec.signal });
+          return { key: `none:${meta.mid}:${meta.bvid}`, kind: 'none', mid: meta.mid, owner: meta.owner, title: '', total: 0 };
+        }
+
+        if (action === 'list') {
+          let mid = Number(args.mid ?? 0);
+          let owner = '';
+          if (!mid && args.url) {
+            const meta = await bili.view(parseVideoRef(args.url), { signal: exec.signal });
+            mid = meta.mid;
+            owner = meta.owner;
+          }
+          if (!mid) throw new Error('需要 mid 或 url');
+          const collections = await listCollections(bili, mid, { signal: exec.signal });
+          for (const item of collections) if (!kb.getSeries(item.key)) kb.saveSeries(item, []);
+          return {
+            ok: true,
+            mid,
+            owner,
+            collections: collections.map((c) => ({
+              key: c.key, kind: c.kind, title: c.title, total: c.total,
+              learned: kb.seriesProgress(c.key)?.learned.length ?? 0,
+            })),
+            how: '挑一个 key，用 action=find/learn 按顺序学。',
+          };
+        }
+
+        if (action === 'cluster') {
+          const keyword = String(args.keyword ?? '').trim();
+          if (!keyword) throw new Error('cluster 需要 keyword（通常就是系列名）');
+          const results = await bili.search(keyword, { limit: 30, signal: exec.signal });
+          const pool = args.owner ? results.filter((r) => String(r.author) === String(args.owner)) : results;
+          const groups = clusterByPrefix(pool, { min: 3 });
+          return {
+            ok: groups.length > 0,
+            keyword,
+            scanned: pool.length,
+            groups,
+            how: groups.length
+              ? '这是没有合集时的兜底：挑一组里任意一集，用 action=find 看它有没有真合集；没有就逐集 bili_learn，再用 bili_skill 传这组 bvids。'
+              : '没聚出成组（≥3 集同前缀）。换 keyword 或直接逐集 bili_learn。',
+          };
+        }
+
+        const collection = await resolveCollection();
+        if (collection.kind === 'none') {
+          return {
+            ok: false,
+            action,
+            mid: collection.mid,
+            owner: collection.owner,
+            how: '这个稿件不在任何合集里。用 action=cluster 按标题前缀找同系列，或者逐集 bili_learn。',
+          };
+        }
+        if (args.refresh !== false) {
+          const { episodes, total } = await collectionEpisodes(bili, collection, { signal: exec.signal });
+          kb.saveSeries({ ...collection, total }, episodes);
+        }
+        const progress = kb.seriesProgress(collection.key);
+        if (!progress || progress.total === 0) {
+          return { ok: false, action, key: collection.key, how: '合集清单为空：接口没返回稿件（可能被风控或合集已删除）。' };
+        }
+
+        if (action === 'find' || action === 'next') {
+          return {
+            ok: true,
+            action,
+            key: collection.key,
+            series: { title: progress.series.title, owner: progress.series.owner, mid: progress.series.mid, total: progress.total },
+            learned: progress.learned.map((v) => ({ index: v.index, bvid: v.bvid, title: v.title, cards: v.cards })),
+            missing: progress.missing.map((v) => ({ index: v.index, bvid: v.bvid, title: v.title, duration: v.duration })),
+            next: progress.next ? { index: progress.next.index, bvid: progress.next.bvid, title: progress.next.title, url: progress.next.url } : null,
+            how: progress.next
+              ? `下一集是第 ${progress.next.index} 集。action=learn 连学（默认 3 集），或 bili_learn 单学。`
+              : '这个系列已全部学过。用 bili_skill 传 series 把整个系列组装成一个技能。',
+          };
+        }
+
+        // learn：按合集顺序连学未学的集
+        const cap = Math.min(10, Math.max(1, Number(args.limit ?? 3)));
+        const queue = progress.missing.slice(0, cap);
+        if (queue.length === 0) {
+          return { ok: true, action: 'learn', key: collection.key, results: [], note: '没有未学的集了。' };
+        }
+        const results = [];
+        for (const ep of queue) {
+          if (exec.signal?.aborted) {
+            results.push({ index: ep.index, bvid: ep.bvid, ok: false, note: '已取消，剩余集数下次接着学' });
+            break;
+          }
+          const one = await learnOne(
+            {
+              url: ep.url,
+              distill: args.distill,
+              max_minutes: args.max_minutes,
+              force: args.force,
+              series: { key: collection.key, index: ep.index, total: progress.total, title: progress.series.title },
+            },
+            exec,
+          );
+          results.push({
+            index: ep.index,
+            bvid: ep.bvid,
+            title: ep.title,
+            ok: one.ok !== false,
+            skipped: one.skipped ?? false,
+            cards: one.cards ?? 0,
+            coverage: one.coverage,
+            warnings: one.warnings ?? [],
+          });
+        }
+        const after = kb.seriesProgress(collection.key);
+        return {
+          ok: results.every((r) => r.ok),
+          action: 'learn',
+          key: collection.key,
+          series: { title: progress.series.title, total: progress.total, learned: after.learned.length, missing: after.missing.length },
+          results,
+          next: after.next ? { index: after.next.index, bvid: after.next.bvid, title: after.next.title } : null,
+          how: after.next
+            ? `还剩 ${after.missing.length} 集。再跑一次 action=learn 会接着学第 ${after.next.index} 集。`
+            : '全系列学完。用 bili_skill 传 series 把整个系列组装成一个技能。',
+        };
       },
     }),
   );
@@ -326,6 +503,7 @@ export function apply(ctx, config) {
         properties: {
           query: { type: 'string', description: '问题或关键词（中文/英文都行）' },
           bvid: { type: 'string', description: '限定某个视频（BV 号）' },
+          series: { type: 'string', description: '限定某个系列（如 season:1234567，来自 bili_series）' },
           limit: { type: 'integer', description: '最多返回多少条（默认 8）' },
           with_lines: { type: 'boolean', description: '是否同时检索讲稿原文（默认 true）' },
         },
@@ -445,7 +623,7 @@ export function apply(ctx, config) {
   disposers.push(
     ctx.tools.register({
       name: 'bili_status',
-      description: '查看 B 站知识库总览：学过哪些视频、卡片数、已掌握数、待复习数、告警与存放位置。',
+      description: '查看 B 站知识库总览：学过哪些视频、卡片数、已掌握数、待复习数、系列进度、告警与存放位置。',
       parameters: { type: 'object', additionalProperties: false, properties: {}, required: [] },
       output: { schema: { type: 'object' }, render: (_args, value) => TOOL_TEXT(value) },
       isConcurrencySafe: () => true,
@@ -614,6 +792,7 @@ export function apply(ctx, config) {
         additionalProperties: false,
         properties: {
           bvids: { type: 'array', items: { type: 'string' }, description: '用哪些视频的知识（BV 号）' },
+          series: { type: 'string', description: '按系列出技能：该系列已学的稿件全部进来（如 season:1234567）；给了 series 可不给 bvids' },
           name: { type: 'string', description: '技能目录名，用英文/拼音短横线，如 h3-realism-camera' },
           title: { type: 'string', description: '技能标题（默认取 name）' },
           description: { type: 'string', description: 'frontmatter description：这个技能管什么' },
@@ -621,16 +800,25 @@ export function apply(ctx, config) {
           extra: { type: 'string', description: '要插在正文前面的自定义段落（如与其他技能的分工说明）' },
           force: { type: 'boolean', description: '已存在同名 SKILL.md 时是否覆盖' },
         },
-        required: ['bvids', 'name'],
+        required: ['name'],
       },
       output: { schema: { type: 'object' }, render: (_args, value) => TOOL_TEXT(value) },
       isConcurrencySafe: () => false,
       async execute(args, exec) {
         const name = slugify(args.name);
+        const wanted = [...(args.bvids ?? [])];
+        let seriesNote = '';
+        if (args.series) {
+          const progress = kb.seriesProgress(args.series);
+          if (!progress) throw new Error(`知识库里没有系列 ${args.series}；先 bili_series action=find 把它拉下来`);
+          wanted.push(...progress.learned.map((v) => v.bvid));
+          seriesNote = `来源系列：${progress.series.title}（合集共 ${progress.total} 集，已学 ${progress.learned.length} 集）\n\n`;
+        }
+        if (wanted.length === 0) throw new Error('需要 bvids 或 series（两者都可）');
         const sources = [];
         const cards = [];
         const missing = [];
-        for (const bvid of args.bvids ?? []) {
+        for (const bvid of wanted) {
           const store = kb.load(bvid);
           if (!store?.meta || !store.cards?.length) {
             missing.push(bvid);
@@ -639,7 +827,7 @@ export function apply(ctx, config) {
           sources.push({ bvid, title: store.meta.title, url: store.meta.url, owner: store.meta.owner, duration: store.meta.duration });
           cards.push(...store.cards.map((c) => ({ ...c, _bvid: bvid })));
         }
-        if (cards.length === 0) throw new Error(`这些视频在知识库里没有卡片：${missing.join(',') || args.bvids.join(',')}；先 bili_learn`);
+        if (cards.length === 0) throw new Error(`这些视频在知识库里没有卡片：${missing.join(',') || wanted.join(',')}；先 bili_learn`);
         const skillsDir = cfg.skillsDir || path.join(path.dirname(kb.root), 'skills');
         const content = buildSkill({
           name,
@@ -648,7 +836,7 @@ export function apply(ctx, config) {
           whenToUse: args.whenToUse ?? args.description ?? `处理相关任务时使用；每条结论都能回跳原视频核对。`,
           sources,
           cards,
-          extra: args.extra ?? '',
+          extra: seriesNote + (args.extra ?? ''),
         });
         const { file } = writeSkill({ skillsDir, name, content, force: Boolean(args.force) });
         return {
@@ -689,10 +877,15 @@ export function apply(ctx, config) {
           const stats = kb.stats();
           if (stats.videos === 0) return '';
           const lines = stats.list.slice(0, 12).map((v) => `- ${v.bvid} ${clip(v.title, 48)}｜${v.cards} 张卡片`);
+          const seriesLines = (stats.series ?? [])
+            .filter((s) => s.total > 0)
+            .slice(0, 5)
+            .map((s) => `- 系列「${clip(s.title, 30)}」已学 ${s.learned}/${s.total} 集${s.next ? `｜下一集：${clip(s.next, 34)}` : '｜已学完'}（bili_series key=${s.key}）`);
           return [
             `B 站知识库（${stats.root}）已学会 ${stats.videos} 个视频、${stats.cards} 张卡片，其中 ${stats.due} 张待复习。`,
             ...lines,
-            '处理相关任务前先 bili_recall 检索这些知识；需要复习用 bili_practice；新视频用 bili_learn。',
+            ...(seriesLines.length ? ['系列进度（同一 UP 主的合集）：', ...seriesLines] : []),
+            '处理相关任务前先 bili_recall 检索这些知识；需要复习用 bili_practice；新视频用 bili_learn；学同一 UP 主的系列教程用 bili_series（find/next/learn）。',
           ].join('\n');
         },
       }),

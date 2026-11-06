@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-bili-learn",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "把 B 站视频读成带时间锚点的知识卡片，并在后续会话中检索、复习和应用。",
