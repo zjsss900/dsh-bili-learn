@@ -25,7 +25,7 @@
 | 工具 | 作用 |
 |---|---|
 | `bili_search` | 搜候选视频（标题、UP 主、时长、播放量），用来决定学哪个 |
-| `bili_learn` | 抓元数据与字幕 → 分段 → 提取知识卡片，写入本地知识库 |
+| `bili_learn` | 抓元数据与字幕 → 分段 → 提取知识卡片；`pages` / `all_pages` 批量学多 P |
 | `bili_series` | 同一 UP 主的同一系列教程：`find` / `list` / `next` / `learn` / `cluster` |
 | `bili_recall` | 在已学知识里检索卡片与讲稿证据（返回时间戳与回跳链接） |
 | `bili_practice` | 复习闭环：`due` 列出待复习卡片，`grade` 记录 ok/miss 并更新熟练度与下次复习时间 |
@@ -61,6 +61,25 @@
 - 按系列学的稿件会带 `series` 标记，于是 `bili_recall` 可以用 `{"series":"season:1234567"}` 限定检索，`bili_skill` 可以用 `{"series":"season:1234567"}` 把整个系列一次出成一个技能。
 - `bili_status` 会列出每个系列的 `learned/total` 与下一集；注入到系统提示里的索引也带这行，新会话一上来就知道还差几集。
 - `cluster` 只是启发式兜底（去掉【】、括号、集数编号后按标题前缀聚组），有真合集时优先用真合集。
+
+## 多 P 合集：一门课几十 P，一页一目录
+
+一个 bvid 可以有多个 P。现在**每一页存自己的目录**：P1 仍是 `<bvid>/`（老数据不动），P2 是 `<bvid>_p2/`。以前学 P2 会把 P1 的 `cards.md`/`transcript.md` 整份冲掉。
+
+```jsonc
+// 批量学（一门课可能 35 P，分批更稳）
+{ "url": "BVxxxxxxxxxx", "pages": [1, 2, 3] }
+{ "url": "BVxxxxxxxxxx", "all_pages": true }
+```
+
+配套口径：
+
+- `bili_note`、`bili_practice` 的 `grade` 要带 `page`（不带就是 P1）；`due` 不给 `page` 会把这个 bvid 的所有页一起算。
+- `bili_recall` 传 `bvid` 会跨页检索，P2 起的回跳链接自动带 `?p=`。
+- `bili_skill` 传这个 bvid，会把它的**所有已学页汇总成一个技能**，来源按页标注。
+- `bili_status` 与注入的系统提示里显示成 `BVxxx P2`。
+
+实测（35 P 的《影视导演基础》）：先学 P1（15 张卡），再 `pages:[2,3]` → P1 的 15 张卡与 929 行讲稿**完好无损**；再学 P1 直接 `skipped`，不动别的页。
 
 ## 安装
 
@@ -119,7 +138,7 @@ examples/bili-kb/BV1tRxt68EZa/
 ## 测试
 
 ```bash
-node tests/selftest.mjs   # PASS 39 checks   纯函数与知识库读写门禁（含系列进度）
+node tests/selftest.mjs   # PASS 47 checks   纯函数与知识库门禁（含系列进度、多 P 互不覆盖）
 node tests/tool-test.mjs  # PASS 10 tools    用假 ctx 驱动真实工具，验证输出无损
 ```
 

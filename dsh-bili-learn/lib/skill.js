@@ -16,7 +16,8 @@ export function slugify(text) {
   return slug;
 }
 
-const link = (bvid, t) => `https://www.bilibili.com/video/${bvid}?t=${Math.floor(Number(t) || 0)}`;
+// 多 P 视频必须带 ?p=，否则跳过去的是 P1 的那一秒。
+const link = (bvid, t, page = 1) => `https://www.bilibili.com/video/${bvid}${page > 1 ? `?p=${page}&t=` : '?t='}${Math.floor(Number(t) || 0)}`;
 
 /** 生成 SKILL.md 文本。 */
 export function buildSkill({ name, title, description, whenToUse, sources, cards, extra = '' }) {
@@ -31,7 +32,7 @@ export function buildSkill({ name, title, description, whenToUse, sources, cards
     '',
     '本技能由 B 站视频学习闭环自动生成，**每条规则后面都给了回跳原视频的链接**；核对或深入时点开。',
     '来源：',
-    ...sources.map((s) => `- [${s.title}](${s.url})｜UP ${s.owner}｜时长 ${Math.round((s.duration ?? 0) / 60)} 分钟`),
+    ...sources.map((s) => `- [${s.title}](${s.url}${s.page > 1 ? `?p=${s.page}` : ''})｜UP ${s.owner}｜时长 ${Math.round((s.duration ?? 0) / 60)} 分钟${s.page > 1 ? `｜P${s.page}${s.part ? ` ${s.part}` : ''}` : ''}`),
     '',
   ];
   if (extra.trim()) lines.push(extra.trim(), '');
@@ -49,7 +50,7 @@ export function buildSkill({ name, title, description, whenToUse, sources, cards
       if (card.why) lines.push(`- 为什么：${card.why}`);
       for (const step of card.how ?? []) lines.push(`- 怎么做：${step}`);
       const evidence = (card.evidence ?? []).slice(0, 4);
-      if (evidence.length) lines.push(`- 依据：${evidence.map((e) => `[${Math.floor(e.t)}s] ${link(card._bvid, e.t)}`).join(' ')}`);
+      if (evidence.length) lines.push(`- 依据：${evidence.map((e) => `[${Math.floor(e.t)}s] ${link(card._bvid, e.t, card._page ?? 1)}`).join(' ')}`);
       lines.push('');
     }
   }

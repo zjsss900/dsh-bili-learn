@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { BiliClient, normalizeCookie, parsePageIndex, parseVideoRef } from './lib/bili.js';
-import { KnowledgeBase, defaultKbRoot } from './lib/kb.js';
+import { KnowledgeBase, defaultKbRoot, jumpUrl, pageKey } from './lib/kb.js';
 import { distillSegments } from './lib/distill.js';
 import { grabFrame, playurlMp4, resolveFfmpeg } from './lib/frames.js';
 import { buildSkill, slugify, writeSkill } from './lib/skill.js';
@@ -63,7 +63,8 @@ const SKILL_BODY = `# B 站视频学习闭环（dsh-bili-learn）
 1. 用户给出视频链接 → \`bili_learn\`。看返回里的 \`coverage\` 与 \`warnings\`：
    - 报「没有字幕/匿名拿不到字幕」→ 调 \`bili_login\` 让用户扫码，Cookie 会写进 cookieFile，之后重跑即可；不要凭空编造内容。
    - 用户手上有文稿 → 直接传 \`transcript_path\` / \`transcript_text\`。
-2. **同一 UP 主的系列教程**：给系列里任意一集跑 \`bili_series\`（action=find）→ 拿到合集标题、全部集数、已学/未学；再 action=learn 按顺序连学（默认 3 集，用 limit 调）。稿件不在任何合集时 action=cluster 按标题前缀聚组。整个系列学完后 \`bili_skill\` 传 \`series\` 一次出技能。
+2. **多 P 合集（一门课几十 P）**：\`bili_learn\` 传 \`pages:[1,2,3]\` 或 \`all_pages:true\` 批量学。每页各存各的目录（P1=\`<bvid>/\`，P2=\`<bvid>_p2/\`），**不会互相覆盖**；\`bili_note\` / \`bili_practice\` 要带 \`page\`；\`bili_recall\` 传 bvid 会跨页检索，回跳链接自动带 \`?p=\`；\`bili_skill\` 传这个 bvid 会把所有已学页汇总成一个技能。
+3. **同一 UP 主的系列教程**：给系列里任意一集跑 \`bili_series\`（action=find）→ 拿到合集标题、全部集数、已学/未学；再 action=learn 按顺序连学（默认 3 集，用 limit 调）。稿件不在任何合集时 action=cluster 按标题前缀聚组。整个系列学完后 \`bili_skill\` 传 \`series\` 一次出技能。
 3. **画面比字幕多信息**：讲稿里出现「看这个画面 / 如图所示 / 参数如下 / 核心提示词：…」，或卡片涉及界面操作、参数、对比效果时，用 \`bili_frame\` 按 evidence 的秒数抽帧，再 \`read_image\` 看。实测教程视频会把提示词原文、参数、UI 只画在画面上，语音字幕里没有。
 3. 提取完成后，**自己复核卡片**：读 \`cards.md\`，对照 \`transcript.md\` 的时间锚点，用 \`bili_note\` 修正含糊、错误或缺失的卡片（模型自己写的卡片比自动提取更可靠）。发现整片字幕与主题无关（如无旁白的效果展示片）→ 用 \`bili_note\` 的 \`replace: true\` 换成诚实的说明卡。
 4. 用 \`bili_practice\`（action=due）取待复习卡片，逐张自测：先不看答案复述「结论/为什么/怎么做」，再用 action=grade 记录 ok/miss。
@@ -73,7 +74,7 @@ const SKILL_BODY = `# B 站视频学习闭环（dsh-bili-learn）
 ## 诚实规则
 - 卡片必须有时间戳证据；没有证据的判断标 \`confidence: low\` 或直接不写。
 - 分段状态是 \`unread\` 的，明确告诉用户「这段没读懂」，不要用它做结论。
-- 引用知识库内容时给出 \`https://www.bilibili.com/video/BVxxx?t=秒\` 形式的回跳链接。
+- 引用知识库内容时给出 \`https://www.bilibili.com/video/BVxxx?t=秒\` 形式的回跳链接；多 P 视频必须带 \`?p=页码\`，否则跳过去的是 P1 的那一秒。
 `;
 
 const TOOL_TEXT = (value) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }];
@@ -179,6 +180,8 @@ export function apply(ctx, config) {
         properties: {
           url: { type: 'string', description: 'B 站视频链接、BV 号或 av 号' },
           page: { type: 'integer', description: '分 P 序号（默认取链接里的 ?p=，否则 1）' },
+          pages: { type: 'array', items: { type: 'integer' }, description: '按页批量学：要学的分 P 序号数组，如 [1,2,3]。每页单独落盘，互不覆盖' },
+          all_pages: { type: 'boolean', description: '学全部多 P（合集可能几十 P，会很慢；建议用 pages 分批）' },
           transcript_path: { type: 'string', description: '本地文稿路径（JSON 或带 [mm:ss] 的文本），优先于在线字幕' },
           transcript_text: { type: 'string', description: '直接粘贴的文稿' },
           distill: { type: 'boolean', description: '是否调用模型提取卡片（默认按插件配置）' },
@@ -191,6 +194,44 @@ export function apply(ctx, config) {
       timeoutMs: 3600000,
       isConcurrencySafe: () => false,
       async execute(args, exec) {
+        // 多 P：逐页调用同一条管线。每页落在自己的目录里（P1=<bvid>，P2=<bvid>_p2），
+        // 绝不再互相覆盖——这是之前学 P2 冲掉 P1 卡片的那个坑。
+        if (args.all_pages === true || Array.isArray(args.pages)) {
+          const bili = client();
+          const meta = await bili.view(parseVideoRef(args.url), { signal: exec.signal });
+          const wanted = args.all_pages === true
+            ? meta.pages.map((p) => p.index)
+            : (args.pages ?? []).map((n) => Number(n)).filter((n) => Number.isFinite(n) && n >= 1);
+          const results = [];
+          for (const index of wanted.slice(0, 60)) {
+            if (exec.signal?.aborted) {
+              results.push({ page: index, ok: false, note: '已取消，剩余页下次接着学' });
+              break;
+            }
+            const rest = { ...args };
+            delete rest.pages;
+            delete rest.all_pages;
+            const one = await learnOne({ ...rest, page: index }, exec);
+            results.push({
+              page: index,
+              part: meta.pages.find((p) => p.index === index)?.part ?? '',
+              ok: one.ok !== false,
+              skipped: one.skipped ?? false,
+              cards: one.cards ?? 0,
+              coverage: one.coverage,
+              warnings: one.warnings ?? [],
+            });
+          }
+          const done = results.filter((r) => r.ok && !r.skipped).length;
+          return {
+            ok: results.every((r) => r.ok),
+            bvid: meta.bvid,
+            title: meta.title,
+            pages: { total: meta.pages.length, requested: wanted.length, learned: done, skipped: results.filter((r) => r.skipped).length },
+            results,
+            how: `每页各存各的目录（P1=${meta.bvid}/，P2=${meta.bvid}_p2/）。出技能时 bili_skill 传 bvids=["${meta.bvid}"] 会自动汇总这个 bvid 的所有已学页。`,
+          };
+        }
         return learnOne(args, exec);
       },
     }),
@@ -206,16 +247,17 @@ export function apply(ctx, config) {
         const page = meta.pages.find((p) => p.index === pageIndex) ?? meta.pages[0];
         if (!page) throw new Error(`${meta.bvid} 没有可用分 P`);
 
-        const existing = kb.load(meta.bvid);
+        const existing = kb.load(meta.bvid, pageIndex);
         if (existing?.cards?.length && args.force !== true) {
           return {
             ok: true,
             skipped: true,
             bvid: meta.bvid,
+            page: pageIndex,
             title: meta.title,
             cards: existing.cards.length,
-            note: '已学过。要重学传 force=true；要补卡片用 bili_note。',
-            paths: { dir: kb.videoDir(meta.bvid) },
+            note: '这一页已学过。要重学传 force=true；要补卡片用 bili_note（记得带 page）。',
+            paths: { dir: kb.videoDir(meta.bvid, pageIndex) },
           };
         }
 
@@ -311,11 +353,11 @@ export function apply(ctx, config) {
           ...(distillReport ? { distill: distillReport } : {}),
           warnings,
           paths: {
-            dir: kb.videoDir(meta.bvid),
-            transcript: `${meta.bvid}/transcript.md`,
-            outline: `${meta.bvid}/outline.md`,
-            cards: `${meta.bvid}/cards.md`,
-            study: `${meta.bvid}/study.md`,
+            dir: kb.videoDir(meta.bvid, pageIndex),
+            transcript: `${pageKey(meta.bvid, pageIndex)}/transcript.md`,
+            outline: `${pageKey(meta.bvid, pageIndex)}/outline.md`,
+            cards: `${pageKey(meta.bvid, pageIndex)}/cards.md`,
+            study: `${pageKey(meta.bvid, pageIndex)}/study.md`,
           },
           next: cards.length > 0
             ? '复核 cards.md（对照 transcript.md 的时间锚点），必要时用 bili_note 修正；然后 bili_practice 自测。'
@@ -520,15 +562,16 @@ export function apply(ctx, config) {
           cards: hits.cards.map((c) => ({
             id: c.id,
             bvid: c._video.bvid,
+            page: c._video.page ?? 1,
             title: c.title,
             kind: c.kind,
             claim: c.claim,
             why: c.why,
             how: c.how,
             confidence: c.confidence,
-            evidence: (c.evidence ?? []).map((e) => ({ t: formatTime(e.t), jump: `https://www.bilibili.com/video/${c._video.bvid}?t=${Math.floor(e.t)}`, quote: clip(e.quote, 160) })),
+            evidence: (c.evidence ?? []).map((e) => ({ t: formatTime(e.t), jump: jumpUrl(c._video.url ?? `https://www.bilibili.com/video/${c._video.bvid}`, e.t, c._video.page ?? 1), quote: clip(e.quote, 160) })),
           })),
-          lines: hits.lines.map((l) => ({ bvid: l.bvid, t: formatTime(l.t), text: clip(l.text, 200), jump: l.url })),
+          lines: hits.lines.map((l) => ({ bvid: l.bvid, page: l.page ?? 1, t: formatTime(l.t), text: clip(l.text, 200), jump: l.url })),
           note: empty ? '知识库里没有相关内容；可能还没学这个视频（bili_learn），或需要换关键词。' : '先按卡片作答，再用 jump 链接核对原视频。',
         };
       },
@@ -545,6 +588,7 @@ export function apply(ctx, config) {
         properties: {
           action: { type: 'string', enum: ['due', 'grade'], description: 'due=取待复习卡片；grade=记录结果' },
           bvid: { type: 'string', description: '限定视频（BV 号）；due 时可省略，逐个视频返回' },
+          page: { type: 'integer', description: '限定分 P（多 P 视频）；省略 = 该视频所有页一起算' },
           limit: { type: 'integer', description: 'due 的返回上限（默认 20）' },
           results: {
             type: 'array',
@@ -555,6 +599,7 @@ export function apply(ctx, config) {
               properties: {
                 card_id: { type: 'string' },
                 verdict: { type: 'string', enum: ['ok', 'miss'] },
+                page: { type: 'integer', description: '卡片所在分 P（多 P 视频必填，默认 1）' },
               },
               required: ['card_id', 'verdict'],
             },
@@ -568,11 +613,11 @@ export function apply(ctx, config) {
         if (args.action === 'grade') {
           if (!args.bvid) throw new Error('grade 需要 bvid');
           if (!Array.isArray(args.results) || args.results.length === 0) throw new Error('grade 需要 results');
-          return { ok: true, bvid: args.bvid, applied: kb.applyReview(args.bvid, args.results) };
+          return { ok: true, bvid: args.bvid, applied: kb.applyReviewMulti(args.bvid, args.results, { page: Number(args.page ?? 1) }) };
         }
-        const bvids = args.bvid ? [args.bvid] : kb.listVideos().map((v) => v.bvid);
+        const bvids = args.bvid ? [args.bvid] : [...new Set(kb.listVideos().map((v) => v.bvid))];
         const items = [];
-        for (const id of bvids) items.push(...kb.dueCards(id, { limit: Number(args.limit ?? 20) }).map((c) => ({ bvid: id, ...c })));
+        for (const id of bvids) items.push(...kb.dueCards(id, { page: args.page, limit: Number(args.limit ?? 20) }).map((c) => ({ bvid: id, ...c })));
         return { ok: true, due: items.slice(0, Number(args.limit ?? 20)), how: '先不看 claim 复述「结论/为什么/怎么做」，再用 action=grade 记录 ok/miss。' };
       },
     }),
@@ -587,6 +632,7 @@ export function apply(ctx, config) {
         additionalProperties: false,
         properties: {
           bvid: { type: 'string', description: 'BV 号' },
+          page: { type: 'integer', description: '分 P 序号（多 P 视频必填，默认 1）' },
           cards: {
             type: 'array',
             description: '卡片数组',
@@ -607,15 +653,16 @@ export function apply(ctx, config) {
               required: ['title', 'claim'],
             },
           },
-          replace: { type: 'boolean', description: 'true=只保留本次提交的卡片，删掉该视频其余卡片（用来清掉自动提取的废卡）' },
+          replace: { type: 'boolean', description: 'true=只保留本次提交的卡片，删掉这一页其余卡片（用来清掉自动提取的废卡）' },
         },
         required: ['bvid', 'cards'],
       },
       output: { schema: { type: 'object' }, render: (_args, value) => TOOL_TEXT(value) },
       isConcurrencySafe: () => false,
       async execute(args) {
-        const total = kb.saveCards(args.bvid, args.cards, { source: 'agent', replace: Boolean(args.replace) });
-        return { ok: true, bvid: args.bvid, cards: total, path: `${args.bvid}/cards.md` };
+        const page = Number(args.page ?? 1) || 1;
+        const total = kb.saveCards(args.bvid, args.cards, { page, source: 'agent', replace: Boolean(args.replace) });
+        return { ok: true, bvid: args.bvid, page, cards: total, path: `${pageKey(args.bvid, page)}/cards.md` };
       },
     }),
   );
@@ -763,7 +810,7 @@ export function apply(ctx, config) {
         const frames = [];
         for (const raw of (args.times ?? []).slice(0, 8)) {
           const t = Math.floor(Number(raw) || 0);
-          const file = path.join(kb.videoDir(meta.bvid), 'frames', `t${t}.jpg`);
+          const file = path.join(kb.videoDir(meta.bvid, page.index), 'frames', `t${t}.jpg`);
           try {
             await grabFrame({ ffmpeg, url: mp4.url, referer: meta.url, userAgent: bili.ua, t, outPath: file, signal: exec.signal });
             frames.push({ t, file, ok: true, note: '' });
@@ -819,13 +866,20 @@ export function apply(ctx, config) {
         const cards = [];
         const missing = [];
         for (const bvid of wanted) {
-          const store = kb.load(bvid);
-          if (!store?.meta || !store.cards?.length) {
+          // 一个 bvid 的已学页全部汇总进来（多 P 课程出一个技能）。
+          const pages = kb.pagesOf(bvid);
+          if (pages.length === 0) {
             missing.push(bvid);
             continue;
           }
-          sources.push({ bvid, title: store.meta.title, url: store.meta.url, owner: store.meta.owner, duration: store.meta.duration });
-          cards.push(...store.cards.map((c) => ({ ...c, _bvid: bvid })));
+          for (const entry of pages) {
+            const page = entry.page ?? 1;
+            const store = kb.load(bvid, page);
+            if (!store?.meta || !store.cards?.length) continue;
+            sources.push({ bvid, page, part: entry.part ?? '', title: store.meta.title, url: store.meta.url, owner: store.meta.owner, duration: store.meta.duration });
+            cards.push(...store.cards.map((c) => ({ ...c, _bvid: bvid, _page: page })));
+          }
+          if (!sources.some((s) => s.bvid === bvid)) missing.push(bvid);
         }
         if (cards.length === 0) throw new Error(`这些视频在知识库里没有卡片：${missing.join(',') || wanted.join(',')}；先 bili_learn`);
         const skillsDir = cfg.skillsDir || path.join(path.dirname(kb.root), 'skills');
@@ -876,7 +930,7 @@ export function apply(ctx, config) {
         text: () => {
           const stats = kb.stats();
           if (stats.videos === 0) return '';
-          const lines = stats.list.slice(0, 12).map((v) => `- ${v.bvid} ${clip(v.title, 48)}｜${v.cards} 张卡片`);
+          const lines = stats.list.slice(0, 12).map((v) => `- ${v.bvid}${v.page > 1 ? ` P${v.page}` : ''} ${clip(v.title, 48)}｜${v.cards} 张卡片`);
           const seriesLines = (stats.series ?? [])
             .filter((s) => s.total > 0)
             .slice(0, 5)

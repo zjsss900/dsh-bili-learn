@@ -108,6 +108,25 @@ ffmpeg 从哪来：config 的 `ffmpeg` → PATH 上的 `ffmpeg` → `pip install
 - `bili_status` 会列出每个系列的 `learned/total` 与下一集；注入的系统提示里也带这行，新会话直接知道还差几集。
 - `cluster` 只是启发式兜底（去掉【】、括号、集数编号后按前缀聚组），真合集优先。
 
+## 多 P 合集：一门课几十 P，一页一目录
+
+一个 bvid 有多个 P 时，**每一页存自己的目录**：P1 是 `<bvid>/`（老数据不动），P2 是 `<bvid>_p2/`。之前学 P2 会把 P1 的 `cards.md`/`transcript.md` 整份冲掉，现在不会。
+
+```jsonc
+// 批量学（合集可能几十 P，建议分批）
+{ "url": "BVxxxxxxxxxx", "pages": [1, 2, 3] }
+{ "url": "BVxxxxxxxxxx", "all_pages": true }
+```
+
+配套口径：
+
+- `bili_note`、`bili_practice` 的 `grade` 要带 `page`（不带就是 P1）；`due` 不给 `page` 会把这个 bvid 的所有页一起算。
+- `bili_recall` 传 `bvid` 会跨页检索，回跳链接自动带 `?p=`（P1 不带，P2+ 必带）。
+- `bili_skill` 传这个 bvid，会把它的**所有已学页汇总成一个技能**，来源列表按页标注。
+- `bili_status` 与注入的系统提示里，多 P 会显示成 `BVxxx P2`。
+
+实测（35 P 的《影视导演基础》）：先学 P1（15 张卡），再 `pages:[2,3]` → 学完 P1 的 15 张卡与 929 行讲稿**完好无损**，`P2/`、`P3/` 各自独立；再学 P1 直接 `skipped`，不动别的页。
+
 ## 知识库产物
 
 ```
@@ -120,6 +139,8 @@ $DSH_HOME/bili-kb/
     cards.json / cards.md    # 知识卡片：结论 / 为什么 / 怎么做 / 证据时间戳
     study.md                 # 学习契约：自测提问 + 应用任务
     review.json              # 熟练度与下次复习时间
+  BVxxxxxxxx_p2/             # 多 P 的第 2 页起各存一份（P1 仍是 BVxxxxxxxx/）
+  BVxxxxxxxx/frames/         # bili_frame 抽出来的画面
 ```
 
 ## 实测边界（2026-11，本机匿名）

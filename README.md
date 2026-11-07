@@ -25,7 +25,7 @@ The difference in one line: a summary loses the evidence; here every claim carri
 | Tool | Purpose |
 |---|---|
 | `bili_search` | Search candidate videos (title, uploader, duration, view count) to decide what to learn |
-| `bili_learn` | Fetch metadata + subtitles → segment → extract knowledge cards into the local knowledge base |
+| `bili_learn` | Fetch metadata + subtitles → segment → extract knowledge cards into the local knowledge base; `pages` / `all_pages` batch multi-part videos |
 | `bili_series` | Same uploader, same tutorial series: `find` / `list` / `next` / `learn` / `cluster` |
 | `bili_recall` | Search what you already learned; returns cards and transcript evidence with timestamps and jump-back links |
 | `bili_practice` | Review loop: `due` lists cards due, `grade` records ok/miss and updates mastery plus the next review time |
@@ -61,6 +61,25 @@ Measured facts baked into the implementation:
 - Episodes learned through a series carry a `series` tag, so `bili_recall` can be scoped with `{"series":"season:1234567"}` and `bili_skill` can compile the whole series into one skill with `{"series":"season:1234567"}`.
 - `bili_status` reports `learned/total` and the next episode for every series; the injected system-prompt index carries the same line, so a fresh session already knows what is still missing.
 - `cluster` is a heuristic fallback only (it strips 【】 brackets, parentheses and episode numbers, then groups by title prefix). A real collection always wins.
+
+## Multi-part videos: one directory per page
+
+A single `bvid` can hold dozens of parts. **Every part gets its own directory**: P1 stays `<bvid>/` (existing data is untouched), P2 becomes `<bvid>_p2/`. Before this, learning P2 overwrote P1's `cards.md` / `transcript.md` outright.
+
+```jsonc
+// batch learning (a course may have 35 parts — batching is usually wiser)
+{ "url": "BVxxxxxxxxxx", "pages": [1, 2, 3] }
+{ "url": "BVxxxxxxxxxx", "all_pages": true }
+```
+
+Consequences worth knowing:
+
+- `bili_note` and `bili_practice grade` take a `page` (default 1); `bili_practice due` without `page` spans every learned part of that bvid.
+- `bili_recall` with a `bvid` searches across parts, and jump links carry `?p=` for P2 and beyond.
+- `bili_skill` given that bvid compiles **all learned parts into one skill**, sources labelled by part.
+- `bili_status` and the injected index show `BVxxx P2`.
+
+Measured on a 35-part course: learn P1 (15 cards), then `pages:[2,3]` → P1's 15 cards and 929 transcript lines survive untouched; re-learning P1 returns `skipped` and changes nothing.
 
 ## Install
 
@@ -119,7 +138,7 @@ examples/bili-kb/BV1tRxt68EZa/
 ## Tests
 
 ```bash
-node tests/selftest.mjs   # PASS 39 checks   pure functions and knowledge-base read/write gates (incl. series progress)
+node tests/selftest.mjs   # PASS 47 checks   pure functions and knowledge-base gates (series progress + per-page isolation)
 node tests/tool-test.mjs  # PASS 10 tools    drives the real tools with a fake ctx, checks lossless output
 ```
 

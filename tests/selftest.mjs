@@ -22,6 +22,7 @@ const distill = await import(root + 'lib/distill.js');
 const subs = await import(root + 'lib/subs.js');
 const bili = await import(root + 'lib/bili.js');
 const seriesMod = await import(root + 'lib/series.js');
+const skillMod = await import(root + 'lib/skill.js');
 const entry = await import(root + 'index.js');
 
 check('entry exports apply', () => typeof entry.apply === 'function');
@@ -175,6 +176,40 @@ check('stats lists series progress', () => {
   const stats = kb.stats();
   const row = stats.series.find((s) => s.key === 'season:1234567');
   return (row && row.total === 4 && row.learned === 1 && row.missing === 3) || JSON.stringify(stats.series);
+});
+
+// ---------------------------------------------------------------- 多 P：按页分开存，互不覆盖
+const multi = { ...meta, bvid: 'BV1MULTI0001', title: '多P课程', duration: 600 };
+kb.saveVideo({ meta: { ...multi, page: 1, part: 'P1 导论' }, lines: lines.slice(0, 5), segments: segs.slice(0, 1), cards: [{ id: 'm1', title: 'P1 要点', claim: '第一页的结论', evidence: [{ t: 10, quote: 'q' }] }], warnings: [] });
+kb.saveVideo({ meta: { ...multi, page: 2, part: 'P2 进阶' }, lines: lines.slice(0, 3), segments: segs.slice(0, 1), cards: [{ id: 'm2', title: 'P2 要点', claim: '第二页的结论', evidence: [{ t: 20, quote: 'q' }] }], warnings: [] });
+check('multi-P: P1 files survive after learning P2', () => fs.existsSync(path.join(dir, 'BV1MULTI0001', 'cards.json')) && fs.existsSync(path.join(dir, 'BV1MULTI0001_p2', 'cards.json')));
+check('multi-P: both pages keep their own cards', () => (kb.load('BV1MULTI0001', 1).cards.length === 1 && kb.load('BV1MULTI0001', 2).cards.length === 1) || 'cards lost');
+check('multi-P: index lists every page', () => kb.pagesOf('BV1MULTI0001').map((v) => v.page).join(',') === '1,2' || JSON.stringify(kb.pagesOf('BV1MULTI0001')));
+check('multi-P: saveCards targets one page only', () => {
+  kb.saveVideo({ meta: { ...multi, page: 3, part: 'P3 实战' }, lines: lines.slice(0, 2), segments: segs.slice(0, 1), cards: [], warnings: [] });
+  kb.saveCards('BV1MULTI0001', [{ id: 'm3', title: '补 P3', claim: '第三页', evidence: [{ t: 5, quote: 'q' }] }], { page: 3 });
+  return (kb.load('BV1MULTI0001', 3).cards.length === 1 && kb.load('BV1MULTI0001', 1).cards.length === 1) || 'page leak';
+});
+check('multi-P: dueCards spans all pages', () => {
+  const due = kb.dueCards('BV1MULTI0001');
+  return (due.length === 3 && new Set(due.map((c) => c.page)).size === 3) || JSON.stringify(due.map((c) => [c.page, c.card_id]));
+});
+check('multi-P: grade writes review per page', () => {
+  const applied = kb.applyReviewMulti('BV1MULTI0001', [{ card_id: 'm1', verdict: 'ok', page: 1 }, { card_id: 'm2', verdict: 'ok', page: 2 }]);
+  return (applied.length === 2 && kb.load('BV1MULTI0001', 1).review.m1?.mastery === 1 && kb.load('BV1MULTI0001', 2).review.m2?.mastery === 1) || JSON.stringify(applied);
+});
+check('multi-P: transcript jump url carries ?p=', () => {
+  const hits = kb.search('线性代数 秩', { bvid: 'BV1MULTI0001', limit: 20 });
+  const p2 = hits.lines.find((l) => l.page === 2);
+  return (p2 && p2.url.includes('?p=2&t=')) || JSON.stringify(hits.lines.slice(0, 3).map((l) => ({ p: l.page, u: l.url })));
+});
+check('multi-P: skill links carry ?p= for page 2', () => {
+  const built = skillMod.buildSkill({
+    name: 'x', title: 't', description: 'd', whenToUse: 'w',
+    sources: [{ bvid: 'BV1MULTI0001', page: 2, part: 'P2 进阶', title: '多P课程', url: 'https://www.bilibili.com/video/BV1MULTI0001', owner: 'up', duration: 600 }],
+    cards: [{ kind: 'concept', title: 'c', claim: 'x', evidence: [{ t: 42, quote: 'q' }], _bvid: 'BV1MULTI0001', _page: 2 }],
+  });
+  return (built.includes('?p=2&t=42') && built.includes('P2 进阶')) || built.slice(0, 200);
 });
 
 console.log(failures.length === 0 ? `PASS ${total} checks` : `FAIL ${failures.length}/${total}\n- ${failures.join('\n- ')}`);

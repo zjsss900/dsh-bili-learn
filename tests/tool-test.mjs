@@ -29,6 +29,8 @@ check('prompt section registered', sections.length === 1 && sections[0].name ===
 check('bili_series has 5 actions', JSON.stringify(tools.bili_series?.parameters?.properties?.action?.enum) === '["find","list","next","learn","cluster"]', JSON.stringify(tools.bili_series?.parameters?.properties?.action?.enum));
 check('bili_skill can take series instead of bvids', !tools.bili_skill?.parameters?.required?.includes('bvids') && Boolean(tools.bili_skill?.parameters?.properties?.series), JSON.stringify(tools.bili_skill?.parameters?.required));
 check('bili_recall has series filter', Boolean(tools.bili_recall?.parameters?.properties?.series));
+check('bili_learn can batch pages', Boolean(tools.bili_learn?.parameters?.properties?.pages && tools.bili_learn?.parameters?.properties?.all_pages));
+check('bili_note / bili_practice take page', Boolean(tools.bili_note?.parameters?.properties?.page && tools.bili_practice?.parameters?.properties?.page && tools.bili_practice?.parameters?.properties?.results?.items?.properties?.page));
 
 const lossless = (value) => {
   const walk = (v, p) => {
