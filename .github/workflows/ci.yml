@@ -15,7 +15,7 @@ jobs:
           node-version: 20
 
       # 纯函数与知识库读写门禁，不联网
-      - name: selftest (39 checks)
+      - name: selftest (47 checks)
         run: node tests/selftest.mjs
 
       # 用假 ctx 驱动真实工具。其中 bili_learn 不带 transcript_text 的几例会真的访问

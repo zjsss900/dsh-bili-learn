@@ -3,6 +3,35 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-11-07
+
+### 修复 / Fixed
+
+- **多 P 合集不再互相覆盖**：每个分 P 存自己的目录（P1=`<bvid>/`，P2=`<bvid>_p2/`）。之前学 P2 会把 P1 的
+  `cards.json` / `cards.md` / `transcript.md` 整份冲掉——跨页知识活不过下一次 learn
+  / Multi-part videos no longer clobber each other: each part gets its own directory
+- 回跳链接对 P2+ 自动带 `?p=`（`bili_recall`、`bili_skill` 都修了）——否则跳过去的是 P1 的那一秒
+  / Jump links carry `?p=` for part 2 and beyond
+
+### 新增 / Added
+
+- **`bili_learn` 批量学多 P** — `pages:[1,2,3]` 或 `all_pages:true`，逐页跑同一条管线
+  / Batch learning for multi-part videos
+- **按页操作** — `bili_note` 与 `bili_practice` 接受 `page`；`due` 不给 `page` 时跨页汇总；
+  `grade` 的每条结果可带 `page`，各页写各自的 `review.json`
+  / Page-scoped note and practice
+- **跨页检索与汇总出技能** — `bili_recall` 传 bvid 会搜这个 bvid 的所有已学页；`bili_skill` 传 bvid
+  会把所有已学页汇总成一个技能，来源按页标注
+  / Cross-part recall; one skill compiled from every learned part
+- **门禁 / Gates** — `tests/selftest.mjs` 增至 47 项，新增 8 项多 P 隔离用例（学 P2 后 P1 的卡片与讲稿仍在、
+  `saveCards` 只写指定页、`due` 跨页、`grade` 分页写、回跳链接带 `?p=`、技能链接带 `?p=`）
+
+### 实测 / Measured
+
+- 35 P 的《影视导演基础》：先学 P1（15 张卡），再 `pages:[2,3]` → P1 的 15 张卡与 929 行讲稿完好无损；
+  再学 P1 返回 `skipped`，不动别的页；`bili_skill` 汇总出 27 张卡、47 条带 `?p=` 的证据链接
+  / Verified end to end on a real 35-part course
+
 ## [0.2.0] - 2026-11-07
 
 ### 新增 / Added

@@ -12,6 +12,20 @@ export function defaultKbRoot() {
   return path.join(home, 'bili-kb');
 }
 
+/** 索引与目录的键：P1 就是 bvid，P2+ 是 `<bvid>_p2`。 */
+export function pageKey(bvid, page = 1) {
+  const p = Number(page) || 1;
+  return p > 1 ? `${bvid}_p${p}` : bvid;
+}
+
+/** 回跳链接：多 P 要带 ?p=，否则跳到 P1 的秒数对不上。 */
+export function jumpUrl(url, t, page = 1) {
+  const p = Number(page) || 1;
+  const base = String(url ?? '');
+  const sep = base.includes('?') ? '&' : '?';
+  return `${base}${p > 1 ? `${sep}p=${p}&t=` : `${sep}t=`}${Math.floor(Number(t) || 0)}`;
+}
+
 function writeJsonAtomic(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
@@ -39,8 +53,19 @@ export class KnowledgeBase {
     return index;
   }
 
-  videoDir(bvid) {
-    return path.join(this.root, bvid);
+  /**
+   * 多 P 视频按页分目录：P1 沿用 <bvid>（已有数据不动），P2+ 用 <bvid>_p2。
+   * 不这样就会互相覆盖——学 P2 把 P1 的 cards/transcript 整份冲掉（实测踩过）。
+   */
+  videoDir(bvid, page = 1) {
+    return path.join(this.root, pageKey(bvid, page));
+  }
+
+  /** 一个 bvid 在知识库里的所有页（按页码升序）。 */
+  pagesOf(bvid) {
+    return Object.values(this.readIndex().videos ?? {})
+      .filter((v) => v.bvid === bvid)
+      .sort((a, b) => (a.page ?? 1) - (b.page ?? 1));
   }
 
   readIndex() {
@@ -55,8 +80,10 @@ export class KnowledgeBase {
     const index = this.readIndex();
     index.version = INDEX_VERSION;
     index.videos = index.videos ?? {};
-    index.videos[meta.bvid] = { ...(index.videos[meta.bvid] ?? {}), ...meta, ...counts, updatedAt: new Date().toISOString() };
+    const key = pageKey(meta.bvid, meta.page);
+    index.videos[key] = { ...(index.videos[key] ?? {}), ...meta, page: Number(meta.page) || 1, ...counts, updatedAt: new Date().toISOString() };
     writeJsonAtomic(path.join(this.root, 'index.json'), index);
+    return key;
   }
 
   // ------------------------------------------------------------ 系列（合集 / 系列）
@@ -104,7 +131,8 @@ export class KnowledgeBase {
     const learned = [];
     const missing = [];
     for (const ep of episodes) {
-      const entry = index.videos?.[ep.bvid];
+      // 多 P 稿件：任意一页学过就算这一集学过。
+      const entry = Object.values(index.videos ?? {}).find((v) => v.bvid === ep.bvid);
       if (entry) learned.push({ bvid: ep.bvid, index: ep.index, title: ep.title, cards: entry.cards ?? 0, segments: entry.segments ?? 0, coverage: entry.coverage });
       else missing.push(ep);
     }
@@ -112,17 +140,17 @@ export class KnowledgeBase {
   }
 
   /** 给稿件打系列标记（按系列学习时写入，方便按系列检索与出技能）。 */
-  tagVideoSeries(bvid, ref) {
+  tagVideoSeries(bvid, ref, { page = 1 } = {}) {
     const index = this.readIndex();
-    const video = index.videos?.[bvid];
+    const video = index.videos?.[pageKey(bvid, page)];
     if (!video) return false;
     video.series = ref;
     writeJsonAtomic(path.join(this.root, 'index.json'), index);
     return true;
   }
 
-  load(bvid) {
-    const dir = this.videoDir(bvid);
+  load(bvid, page = 1) {
+    const dir = this.videoDir(bvid, page);
     if (!fs.existsSync(dir)) return undefined;
     return {
       meta: readJsonSafe(path.join(dir, 'source.json'), undefined),
@@ -136,7 +164,7 @@ export class KnowledgeBase {
   /** 写入一个视频的全部产物。 */
   saveVideo({ meta, lines, segments, cards, warnings }) {
     this.ensure();
-    const dir = this.videoDir(meta.bvid);
+    const dir = this.videoDir(meta.bvid, meta.page);
     fs.mkdirSync(dir, { recursive: true });
     writeJsonAtomic(path.join(dir, 'source.json'), meta);
     writeJsonAtomic(path.join(dir, 'transcript.json'), lines);
@@ -169,11 +197,13 @@ export class KnowledgeBase {
     );
 
     fs.writeFileSync(path.join(dir, 'cards.md'), renderCards(meta, cards), 'utf8');
-    fs.writeFileSync(path.join(dir, 'study.md'), renderStudy(meta, cards, this.load(meta.bvid)?.review ?? {}), 'utf8');
+    fs.writeFileSync(path.join(dir, 'study.md'), renderStudy(meta, cards, this.load(meta.bvid, meta.page)?.review ?? {}), 'utf8');
 
     this.upsertIndex(
       {
         bvid: meta.bvid,
+        page: meta.page ?? 1,
+        part: meta.part ?? '',
         title: meta.title,
         owner: meta.owner,
         url: meta.url,
@@ -185,14 +215,14 @@ export class KnowledgeBase {
       { cards: cards.length, segments: segments.length, lines: lines.length },
     );
     if (meta.series?.key) {
-      this.tagVideoSeries(meta.bvid, { key: meta.series.key, index: meta.series.index ?? 0, total: meta.series.total ?? 0, title: meta.series.title ?? '' });
+      this.tagVideoSeries(meta.bvid, { key: meta.series.key, index: meta.series.index ?? 0, total: meta.series.total ?? 0, title: meta.series.title ?? '' }, { page: meta.page ?? 1 });
     }
     return dir;
   }
 
-  /** 由模型或用户直接写卡片（覆盖同 id 的卡片）。 */
-  saveCards(bvid, cards, { source = 'model', replace = false } = {}) {
-    const existing = this.load(bvid);
+  /** 由模型或用户直接写卡片（覆盖同 id 的卡片）。多 P 必须指定 page，否则默认 P1。 */
+  saveCards(bvid, cards, { page = 1, source = 'model', replace = false } = {}) {
+    const existing = this.load(bvid, page);
     if (!existing?.meta) throw new Error(`知识库里没有 ${bvid}，先运行 bili_learn`);
     // replace=true 时以本次提交为准，删掉该视频其余卡片（用来清掉自动提取的废卡）。
     const byId = new Map(replace ? [] : existing.cards.map((c) => [c.id, c]));
@@ -213,16 +243,17 @@ export class KnowledgeBase {
       });
     }
     const merged = [...byId.values()];
-    writeJsonAtomic(path.join(this.videoDir(bvid), 'cards.json'), merged);
-    fs.writeFileSync(path.join(this.videoDir(bvid), 'cards.md'), renderCards(existing.meta, merged), 'utf8');
-    fs.writeFileSync(path.join(this.videoDir(bvid), 'study.md'), renderStudy(existing.meta, merged, existing.review), 'utf8');
-    this.upsertIndex({ bvid }, { cards: merged.length });
+    const dir = this.videoDir(bvid, page);
+    writeJsonAtomic(path.join(dir, 'cards.json'), merged);
+    fs.writeFileSync(path.join(dir, 'cards.md'), renderCards(existing.meta, merged), 'utf8');
+    fs.writeFileSync(path.join(dir, 'study.md'), renderStudy(existing.meta, merged, existing.review), 'utf8');
+    this.upsertIndex({ bvid, page }, { cards: merged.length });
     return merged.length;
   }
 
   /** 记录复习结果，更新熟练度与下次到期时间。 */
-  applyReview(bvid, results) {
-    const store = this.load(bvid);
+  applyReview(bvid, results, { page = 1 } = {}) {
+    const store = this.load(bvid, page);
     if (!store?.meta) throw new Error(`知识库里没有 ${bvid}`);
     const review = { ...store.review };
     const now = Date.now();
@@ -238,46 +269,68 @@ export class KnowledgeBase {
       review[item.card_id] = state;
       applied.push({ card_id: item.card_id, mastery: state.mastery, due: state.due });
     }
-    writeJsonAtomic(path.join(this.videoDir(bvid), 'review.json'), review);
+    writeJsonAtomic(path.join(this.videoDir(bvid, page), 'review.json'), review);
     return applied;
   }
 
-  dueCards(bvid, { limit = 20, includeUnseen = true } = {}) {
-    const store = this.load(bvid);
-    if (!store?.meta) return [];
+  /** 多 P：results 里可带 page（不带就用 page 参数），按页分别写各自的 review.json。 */
+  applyReviewMulti(bvid, results, { page = 1 } = {}) {
+    const groups = new Map();
+    for (const item of results ?? []) {
+      const p = Number(item.page ?? page) || 1;
+      if (!groups.has(p)) groups.set(p, []);
+      groups.get(p).push(item);
+    }
+    const applied = [];
+    for (const [p, items] of groups) {
+      for (const row of this.applyReview(bvid, items, { page: p })) applied.push({ ...row, page: p });
+    }
+    return applied;
+  }
+
+  /** 待复习卡片。不给 page 就把这个 bvid 的所有页一起算。 */
+  dueCards(bvid, { page, limit = 20, includeUnseen = true } = {}) {
+    const wanted = this.pagesOf(bvid).filter((v) => page === undefined || (v.page ?? 1) === Number(page));
     const now = Date.now();
-    return store.cards
-      .map((card) => {
+    const out = [];
+    for (const entry of wanted) {
+      const store = this.load(bvid, entry.page ?? 1);
+      if (!store?.meta) continue;
+      for (const card of store.cards) {
         const state = store.review[card.id];
         const due = state?.due ? Date.parse(state.due) : 0;
         const seen = Boolean(state);
-        if (!seen && !includeUnseen) return undefined;
-        if (seen && due > now) return undefined;
-        return { card_id: card.id, title: card.title, kind: card.kind, mastery: state?.mastery ?? 0, seen, claim: clip(card.claim, 240) };
-      })
-      .filter(Boolean)
-      .slice(0, limit);
+        if (!seen && !includeUnseen) continue;
+        if (seen && due > now) continue;
+        out.push({ card_id: card.id, page: entry.page ?? 1, title: card.title, kind: card.kind, mastery: state?.mastery ?? 0, seen, claim: clip(card.claim, 240) });
+      }
+    }
+    return out.slice(0, limit);
   }
 
   search(query, { bvid, series, limit = 8, withLines = true } = {}) {
     const tokens = tokenize(query);
     if (tokens.length === 0) return { cards: [], lines: [] };
-    let videos;
-    if (bvid) videos = [bvid];
-    else if (series) videos = (this.seriesProgress(series)?.learned ?? []).map((v) => v.bvid);
-    else videos = this.listVideos().map((v) => v.bvid);
+    const all = Object.values(this.readIndex().videos ?? {});
+    let entries;
+    if (bvid) entries = all.filter((v) => v.bvid === bvid);
+    else if (series) {
+      const ids = new Set((this.seriesProgress(series)?.learned ?? []).map((v) => v.bvid));
+      entries = all.filter((v) => ids.has(v.bvid));
+    } else entries = this.listVideos();
     const cardHits = [];
     const lineHits = [];
-    for (const id of videos) {
-      const store = this.load(id);
+    for (const entry of entries) {
+      const page = entry.page ?? 1;
+      const store = this.load(entry.bvid, page);
       if (!store?.meta) continue;
       for (const card of store.cards) {
         const score = scoreCard(card, tokens);
-        if (score > 0) cardHits.push({ ...card, _video: { bvid: id, title: store.meta.title, url: store.meta.url }, _score: score });
+        if (score > 0) cardHits.push({ ...card, _video: { bvid: entry.bvid, page, title: store.meta.title, url: store.meta.url }, _score: score });
       }
       if (withLines) {
         for (const hit of searchLines(store.lines, tokens, 3)) {
-          lineHits.push({ bvid: id, t: hit.t, text: hit.text, score: hit.score, url: `${store.meta.url}?t=${Math.floor(hit.t)}` });
+          lineHits.push({ bvid: entry.bvid, page, t: hit.t, text: hit.text, score: hit.score, url: jumpUrl(store.meta.url, hit.t, page) });
         }
       }
     }
@@ -293,7 +346,7 @@ export class KnowledgeBase {
     let due = 0;
     const now = Date.now();
     for (const video of videos) {
-      const store = this.load(video.bvid);
+      const store = this.load(video.bvid, video.page ?? 1);
       cards += store?.cards.length ?? 0;
       for (const card of store?.cards ?? []) {
         const state = store.review[card.id];
@@ -317,7 +370,16 @@ export class KnowledgeBase {
         };
       })
       .sort((a, b) => b.total - a.total);
-    return { root: this.root, videos: videos.length, cards, mastered, due, series, list: videos.map((v) => ({ bvid: v.bvid, title: v.title, cards: v.cards ?? 0, series: v.series?.key ?? '', source: v.transcriptSource, warnings: (v.warnings ?? []).length })) };
+    return {
+      root: this.root,
+      videos: videos.length,
+      distinctVideos: new Set(videos.map((v) => v.bvid)).size,
+      cards,
+      mastered,
+      due,
+      series,
+      list: videos.map((v) => ({ bvid: v.bvid, page: v.page ?? 1, part: v.part ?? '', title: v.title, cards: v.cards ?? 0, series: v.series?.key ?? '', source: v.transcriptSource, warnings: (v.warnings ?? []).length })),
+    };
   }
 }
 
