@@ -58,6 +58,28 @@ check('待复习列表两条路一致', dueJson.join('|') === dueSql.join('|') |
 
 kb.saveCards('BVSMOKE01', [...kb.load('BVSMOKE01', 1).cards, { id: 'c4', title: '增量', claim: '这张卡验证索引增量同步是否跟手。', evidence: [{ t: 80, quote: '增量同步' }] }], { page: 1 });
 check('增量写入立刻进索引', kb.search('跟手', { limit: 3, withLines: false, engine: 'sql' }).cards.some((c) => c.id === 'c4') || 'SQL 查不到刚写入的卡');
+check('meta 指纹可读可写（外部写入靠它发现）', (() => { db.metaSet('stamp', 'x1'); const got = db.metaGet('stamp'); db.metaSet('stamp', kb.jsonStamp()); return got === 'x1' || `读回 ${got}`; })());
+check('pageStamps 记下每页的 updated', (() => { const m = db.pageStamps(); return (m.has('BVSMOKE01|1') && (m.get('BVSMOKE01|1') ?? '').length > 0) || JSON.stringify([...m.keys()]); })());
+check('deletePage 只删这一页；rebuild 能补回', (() => {
+  const before = db.counts().cards;
+  db.deletePage({ bvid: 'BVSMOKE01', page: 1 });
+  const gone = db.counts().cards < before && !db.pageStamps().has('BVSMOKE01|1');
+  kb.rebuildIndex();
+  const back = db.counts().cards === before && db.pageStamps().has('BVSMOKE01|1');
+  return (gone && back) || JSON.stringify({ before, after: db.counts().cards, gone, back });
+})());
+check('index.json 被外部改过 → 下次检索自动把缺的页补镜像回来', (() => {
+  db.deletePage({ bvid: 'BVSMOKE01', page: 1 });
+  db.metaSet('stamp', 'stale-by-external-writer');
+  kb.search('正反打', { limit: 8, withLines: false, engine: 'sql' });
+  return db.pageStamps().has('BVSMOKE01|1') || '指纹过期却没补镜像';
+})());
+check('索引页被清空后，小库检索时自动整库补建（自愈，不回落）', (() => {
+  db.deletePage({ bvid: 'BVSMOKE01', page: 1 });
+  db.metaSet('stamp', kb.jsonStamp()); // 指纹没变也不该漏答：页数归零会触发自动重建
+  const r = kb.search('跟手', { limit: 8, withLines: false, engine: 'sql' });
+  return (r.engine === 'sql' && r.cards.length > 0 && db.pageStamps().has('BVSMOKE01|1')) || JSON.stringify({ engine: r.engine, n: r.cards.length });
+})());
 check('重建后体检仍一致', (() => { const r = kb.rebuildIndex(); return (r.ok === true && kb.indexStatus().consistent === true) || JSON.stringify({ r, st: kb.indexStatus() }); })());
 
 kb.indexDb().drop();

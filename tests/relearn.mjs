@@ -45,7 +45,8 @@ for (const spec of targets) {
     const store = kb.load(bvid, page);
     if (!store) continue;
     const segs = store.segments ?? [];
-    const todo = segs.filter((s) => s.status === 'unread');
+    // 默认只补 unread；RELEARN_FORCE=1 时全段重跑（用来验证兜底路径、或收割半段里剩下的知识点）
+    const todo = process.env.RELEARN_FORCE ? segs : segs.filter((s) => s.status === 'unread');
     if (todo.length === 0) {
       console.log(`${bvid} P${page}：没有 unread 段（${segs.length} 段，卡 ${store.cards.length}）`);
       continue;

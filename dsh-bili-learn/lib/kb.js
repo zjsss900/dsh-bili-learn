@@ -86,18 +86,64 @@ export class KnowledgeBase {
   }
 
   /**
-   * 索引空了（老库升级、或索引被删掉）时补建。只在小库上自动做——
-   * 大库一次重建可能要几分钟，不能塞进一次检索里，交给 bili_index action=rebuild。
+   * 用之前先保证索引可用且不陈旧：
+   * 1) 索引空了（老库升级、索引被删）→ 小库直接补建，大库交给 bili_index action=rebuild；
+   * 2) 已有索引但 index.json 指纹变了（旧版本插件写的、别的进程写的、手工改的）→ 只重镜像过期页。
+   * 少了第 2 步会静默少答：SQL 只按已镜像的页返回，页面数比 JSON 少却照样出结果。
    */
   ensureIndex() {
     if (this.engineDefault === 'json') return false;
     const db = this.indexDb();
     if (!db?.open()) return false;
-    if ((db.counts()?.pages ?? 0) > 0) return true;
+    if ((db.counts()?.pages ?? 0) === 0) {
+      const entries = this.listVideos();
+      if (entries.length === 0) return false;
+      if (entries.length > 400) return false;
+      return this.rebuildIndex().ok === true;
+    }
+    return this.syncStalePages().ok === true;
+  }
+
+  /** index.json 的指纹（size:mtime），比对开销是微秒级。 */
+  jsonStamp() {
+    try {
+      const s = fs.statSync(path.join(this.root, 'index.json'));
+      return `${s.size}:${Math.round(s.mtimeMs)}`;
+    } catch {
+      return 'none';
+    }
+  }
+
+  /** 只重镜像过期的页；JSON 里删掉的页也从索引里删掉。指纹没变就直接返回，不扫全库。 */
+  syncStalePages() {
+    const db = this.indexDb();
+    if (!db?.open()) return { ok: false, reason: db?.reason ?? '索引不可用' };
+    const stamp = this.jsonStamp();
+    if (stamp !== 'none' && db.metaGet('stamp') === stamp) return { ok: true, synced: 0, fresh: true };
     const entries = this.listVideos();
-    if (entries.length === 0) return false;
-    if (entries.length > 400) return false;
-    return this.rebuildIndex().ok === true;
+    const have = db.pageStamps();
+    const skipped = [];
+    let synced = 0;
+    for (const entry of entries) {
+      const page = entry.page ?? 1;
+      const key = `${entry.bvid}|${page}`;
+      const want = entry.updatedAt ?? '';
+      const got = have.get(key);
+      have.delete(key);
+      if (got === want && want !== '') continue;
+      const r = this.syncPage(entry.bvid, page);
+      if (r.ok) synced += 1;
+      else skipped.push(`${key}:${r.reason}`);
+    }
+    let removed = 0;
+    for (const key of have.keys()) {
+      const at = key.lastIndexOf('|');
+      db.deletePage({ bvid: key.slice(0, at), page: Number(key.slice(at + 1)) || 1 });
+      removed += 1;
+    }
+    const ok = skipped.length === 0;
+    if (ok && stamp !== 'none') db.metaSet('stamp', stamp);
+    return { ok, synced, removed, skipped, reason: ok ? '' : skipped.join('；') };
   }
 
   /** 写完 JSON 后把这一页镜像进索引。索引失败绝不回滚知识，只在返回里说清楚。 */
@@ -115,13 +161,20 @@ export class KnowledgeBase {
       lines: store.lines,
       review: store.review ?? {},
       counts: { cards: store.cards.length, dropped: (store.filtered ?? []).length, lines: (store.lines ?? []).length },
+      updated: entry.updatedAt ?? '',
     });
+    if (ok) db.metaSet('stamp', this.jsonStamp());
     return { ok, reason: ok ? '' : db.reason };
   }
 
-  /** 全量重建索引（JSON 是真相源，索引只是缓存）。 */
+  /** 全量重建索引（JSON 是真相源，索引只是缓存）。重建完把指纹补上，免得下次检索再补镜像一遍。 */
   rebuildIndex(options) {
-    return rebuildIndex(this, options);
+    const r = rebuildIndex(this, options);
+    if (r?.ok) {
+      const db = this.indexDb();
+      if (db?.open()) db.metaSet('stamp', this.jsonStamp());
+    }
+    return r;
   }
 
   /** 索引与 JSON 是否一致（数量比对，给 verify 用）。 */

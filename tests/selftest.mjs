@@ -343,6 +343,36 @@ check('incremental write is mirrored into the index', () => {
   kb.saveCards('BVDEMO000004', [...existing, { id: 'zz1', title: '索引增量', claim: '这张卡用来验证索引增量同步是否跟手。', evidence: [{ t: 300, quote: '索引增量同步' }] }], { page: 1 });
   return kb.search('跟手', { limit: 3, withLines: false, engine: 'sql' }).cards.some((c) => c.id === 'zz1') || 'SQL 查不到刚写入的卡';
 });
+check('a page written by an older plugin version / another process is re-mirrored before the next search', () => {
+  if (!HAVE_SQL) return true;
+  // 模拟外部写入：只写 JSON、不碰索引（旧版本插件、另一个进程都是这样）。
+  // 少了这一步，SQL 会静默少答：页数比 JSON 少，却照样返回结果。
+  const p = path.join(dir, 'BVDEMO000019');
+  fs.mkdirSync(p, { recursive: true });
+  fs.writeFileSync(path.join(p, 'source.json'), JSON.stringify({ bvid: 'BVDEMO000019', page: 1, title: '旧版写的页', url: 'https://www.bilibili.com/video/BVDEMO000019', owner: 'x' }));
+  fs.writeFileSync(path.join(p, 'cards.json'), JSON.stringify([{ id: 'ow1', title: '外部写入', claim: '外部写入的页也必须能被检索到。', kind: 'concept', evidence: [{ t: 7, quote: '外部写入的页' }] }]));
+  fs.writeFileSync(path.join(p, 'transcript.json'), JSON.stringify([{ t: 7, text: '外部写入的页也要镜像进索引' }]));
+  const idxPath = path.join(dir, 'index.json');
+  const idx = JSON.parse(fs.readFileSync(idxPath, 'utf8'));
+  idx.videos.BVDEMO000019 = { bvid: 'BVDEMO000019', page: 1, title: '旧版写的页', cards: 1, lines: 1, updatedAt: new Date(Date.now() + 5000).toISOString() };
+  fs.writeFileSync(idxPath, JSON.stringify(idx));
+  const before = kb.indexStatus();
+  const hit = kb.search('外部写入', { limit: 5, withLines: false });
+  const after = kb.indexStatus();
+  return (before.consistent === false && hit.cards.some((c) => c.id === 'ow1') && after.consistent === true)
+    || JSON.stringify({ beforePages: before.json.pages, sqlPages: before.sql.pages, ids: hit.cards.map((c) => c.id), afterConsistent: after.consistent });
+});
+check('a page deleted from json is deleted from the index too (no ghost cards)', () => {
+  if (!HAVE_SQL) return true;
+  const idxPath = path.join(dir, 'index.json');
+  const idx = JSON.parse(fs.readFileSync(idxPath, 'utf8'));
+  delete idx.videos.BVDEMO000019;
+  fs.writeFileSync(idxPath, JSON.stringify(idx));
+  kb.search('外部写入', { limit: 5, withLines: false });
+  const st = kb.indexStatus();
+  return (st.consistent === true && !kb.search('外部写入', { limit: 5, withLines: false, engine: 'sql' }).cards.some((c) => c.id === 'ow1'))
+    || JSON.stringify(st);
+});
 check('rebuild from json restores exact counts', () => {
   if (!HAVE_SQL) return true;
   const r = kb.rebuildIndex();

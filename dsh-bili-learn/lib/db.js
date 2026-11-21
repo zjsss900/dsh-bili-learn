@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS review(
 );
 CREATE INDEX IF NOT EXISTS card_bvid_page ON card(bvid, page);
 CREATE INDEX IF NOT EXISTS review_due ON review(due);
+CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 `;
 
 /** 系列列只存 key（season:xxx / series:xxx），别把整个 series 对象塞进 SQL。
@@ -140,7 +141,7 @@ export class IndexDb {
   }
 
   /** 一页全量镜像：JSON 是真相源，这里先删后插，避免增量漏同步。 */
-  syncPage({ bvid, page = 1, meta = {}, cards = [], lines = [], review = {}, judgments = {}, counts = {} }) {
+  syncPage({ bvid, page = 1, meta = {}, cards = [], lines = [], review = {}, judgments = {}, counts = {}, updated = '' }) {
     const db = this.open();
     if (!db) return false;
     const p = Number(page) || 1;
@@ -156,7 +157,7 @@ export class IndexDb {
          VALUES(?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(bvid,page) DO UPDATE SET part=excluded.part,title=excluded.title,url=excluded.url,owner=excluded.owner,
            cards=excluded.cards,dropped=excluded.dropped,lines=excluded.lines,series=excluded.series,updated=excluded.updated`,
-      ).run(bvid, p, bindText(meta.part), bindText(meta.title), bindText(meta.url), bindText(meta.owner), bindNum(counts.cards ?? cards.length), bindNum(counts.dropped), bindNum(counts.lines ?? lines.length), seriesKeyOf(meta.series), new Date().toISOString());
+      ).run(bvid, p, bindText(meta.part), bindText(meta.title), bindText(meta.url), bindText(meta.owner), bindNum(counts.cards ?? cards.length), bindNum(counts.dropped), bindNum(counts.lines ?? lines.length), seriesKeyOf(meta.series), updated || new Date().toISOString());
       const insCard = db.prepare('INSERT INTO card(bvid,page,id,json,title,claim,kind,verdict,pinned) VALUES(?,?,?,?,?,?,?,?,?)');
       const insFts = db.prepare('INSERT INTO card_fts(tw,cw,ww,hw,bvid,page,cid) VALUES(?,?,?,?,?,?,?)');
       for (const c of cards) {
@@ -319,6 +320,43 @@ export class IndexDb {
       file: this.file,
       bytes: fs.existsSync(this.file) ? fs.statSync(this.file).size : 0,
     };
+  }
+
+  /** 索引指纹存这：index.json 的 size:mtime 变了，说明有外部写入（旧版插件/别的进程/手工改）。 */
+  metaGet(k) {
+    const db = this.open();
+    if (!db) return '';
+    return db.prepare('SELECT v FROM meta WHERE k=?').get(k)?.v ?? '';
+  }
+
+  metaSet(k, v) {
+    const db = this.open();
+    if (!db) return false;
+    db.prepare('INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v').run(String(k), String(v));
+    return true;
+  }
+
+  /** 每页记的 updated，用来判断哪一页的镜像过期了。 */
+  pageStamps() {
+    const db = this.open();
+    if (!db) return new Map();
+    const rows = db.prepare('SELECT bvid,page,updated FROM page').all();
+    return new Map(rows.map((r) => [`${r.bvid}|${r.page}`, r.updated ?? '']));
+  }
+
+  deletePage({ bvid, page = 1 } = {}) {
+    const db = this.open();
+    if (!db) return false;
+    const p = Number(page) || 1;
+    for (const sql of [
+      'DELETE FROM card WHERE bvid=? AND page=?',
+      'DELETE FROM card_fts WHERE bvid=? AND page=?',
+      'DELETE FROM line WHERE bvid=? AND page=?',
+      'DELETE FROM line_fts WHERE bvid=? AND page=?',
+      'DELETE FROM review WHERE bvid=? AND page=?',
+      'DELETE FROM page WHERE bvid=? AND page=?',
+    ]) db.prepare(sql).run(bvid, p);
+    return true;
   }
 }
 

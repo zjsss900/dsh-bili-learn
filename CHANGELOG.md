@@ -3,6 +3,23 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.2] - 2026-11-22
+
+### 修复 / Fixed
+
+- **索引会静默变陈旧，检索照常返回结果却少答** — 只有「新代码写的页」会镜像进索引；旧版本插件、另一个进程、
+  手工改 JSON 写的页不会。真库实测：366 页里 **8 页 / 106 卡落在索引外面**，`bili_recall` 照样出结果，看不出来。
+  现在 `index.json` 的指纹（size:mtime）一变，下次检索前只重镜像过期的页（每页记 `updated` 比对），
+  JSON 里删掉的页也从索引删掉；索引页全空时小库自动整库补建。真库补齐一次 15.7 s，之后单查询 ~1 ms。
+  / the index no longer goes stale silently: a fingerprint on index.json triggers a per-page re-mirror
+- `syncPage` 现在把 `index.json` 里的 `updated` 写进索引（之前写的是镜像时刻，没法用来判断哪页过期）
+
+### 门禁 / Gates
+
+- selftest 83 → **85 checks**：外部写入的页会自动补镜像；JSON 删页后索引不留幽灵
+- db-smoke 17 → **22 checks**：`meta` 指纹读写、`pageStamps`、`deletePage`、清空后自动补建、
+  以及一条实测教训——**SQL 候选空时会按设计回落 JSON**，别把它当漏删查
+
 ## [0.5.1] - 2026-11-22
 
 ### 修复 / Fixed
