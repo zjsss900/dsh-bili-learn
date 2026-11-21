@@ -166,9 +166,10 @@ examples/bili-kb/BV1tRxt68EZa/
 ## Tests
 
 ```bash
-node tests/selftest.mjs   # PASS 85 checks   pure functions and knowledge-base gates (series progress, per-page isolation, judgment bookkeeping + rollback, index-layer parity, stale-index self-heal)
+node tests/selftest.mjs   # PASS 87 checks   pure functions and knowledge-base gates (series progress, per-page isolation, judgment bookkeeping + rollback, index-layer parity, stale-index self-heal, colliding card ids renamed)
 node tests/tool-test.mjs  # PASS 12 tools    drives the real tools with a fake ctx, checks lossless output
 node tests/db-smoke.mjs   # PASS 22 checks   index layer smoke: build / mirror / incremental / rebuild / fallback after deletion / external-write detection
+node tests/fix-dup-ids.mjs # repairs history: renames colliding card ids within a page (both cards kept), then rebuilds the index (needed for libraries learned on 0.5.2 or earlier)
 node tests/db-verify.mjs  # optional: dual-run acceptance against your own knowledge base
 node tests/relearn.mjs    # optional: re-distill only the segments stuck at status=unread
 node tests/judge-live.mjs # optional: real model + your own knowledge base, verdict cache only, never touches cards

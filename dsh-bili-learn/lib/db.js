@@ -160,8 +160,14 @@ export class IndexDb {
       ).run(bvid, p, bindText(meta.part), bindText(meta.title), bindText(meta.url), bindText(meta.owner), bindNum(counts.cards ?? cards.length), bindNum(counts.dropped), bindNum(counts.lines ?? lines.length), seriesKeyOf(meta.series), updated || new Date().toISOString());
       const insCard = db.prepare('INSERT INTO card(bvid,page,id,json,title,claim,kind,verdict,pinned) VALUES(?,?,?,?,?,?,?,?,?)');
       const insFts = db.prepare('INSERT INTO card_fts(tw,cw,ww,hw,bvid,page,cid) VALUES(?,?,?,?,?,?,?)');
+      const seenCardIds = new Set();
       for (const c of cards) {
-        insCard.run(bvid, p, String(c.id), JSON.stringify(c), bindText(c.title), bindText(c.claim), bindText(c.kind), bindText(c._verdict), c._pinned ? 1 : 0);
+        // 同一页里 id 撞车会撞主键、抛异常、整页写不进去（实测 3 页因此少了 34 张卡）。
+        // 这里跳过重复项保住整页；改名并保留两张是 kb.js uniqueCardIds 的职责。
+        const cid = String(c.id);
+        if (seenCardIds.has(cid)) { this.dupeCards = (this.dupeCards ?? 0) + 1; continue; }
+        seenCardIds.add(cid);
+        insCard.run(bvid, p, cid, JSON.stringify(c), bindText(c.title), bindText(c.claim), bindText(c.kind), bindText(c._verdict), c._pinned ? 1 : 0);
         // card_fts 用 (bvid,page,cid) 回查，不依赖 rowid 对齐
         insFts.run(bigram(`${c.title ?? ''} ${(c.tags ?? []).join(' ')}`), bigram(c.claim), bigram(c.why), bigram((c.how ?? []).join(' ')), bvid, p, String(c.id));
       }

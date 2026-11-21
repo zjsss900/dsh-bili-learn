@@ -136,6 +136,26 @@ const truncRun = await distill.distillSegments({ llm: truncLlm, provider: 'x', m
 check('长段截断会切两半补救，而不是直接 unread',
   () => (truncRun.cards.length === 2 && truncRun.segmentReports[0].status === 'distilled' && /切两半/.test(truncRun.segmentReports[0].note)) || JSON.stringify({ calls: truncCalls, r: truncRun.segmentReports, n: truncRun.cards.length }));
 
+// 回归：两半段共用 segment.start 做 id 前缀 → 撞 id → 索引主键冲突 → 整页写不进去（真库少了 3 页 34 张卡）
+check('切两半补救出的卡片 id 不撞车',
+  () => { const ids = truncRun.cards.map((c) => c.id); return (ids.length === 2 && new Set(ids).size === 2) || JSON.stringify(ids); });
+check('一页内 id 撞车：saveVideo 改名保留两张，索引照样镜像得进去', () => {
+  kb.saveVideo({
+    meta: { ...meta, bvid: 'BV1DUP00001', page: 3 },
+    lines: [{ t: 12, text: '啮合校验：同页两张卡撞了同一个 id。' }, { t: 30, text: '啮合校验第二条，只在这页出现。' }],
+    segments: segs,
+    cards: [
+      { id: 'x1', title: '甲', claim: '啮合校验甲：主键冲突会让整页进不了索引', evidence: [{ t: 12, quote: '啮合校验' }] },
+      { id: 'x1', title: '乙', claim: '啮合校验乙：重复 id 要改名两张都保留', evidence: [{ t: 30, quote: '啮合校验' }] },
+    ],
+    warnings: [],
+  });
+  const cards = kb.load('BV1DUP00001', 3).cards;
+  const hit = kb.search('啮合', { limit: 8, withLines: false, engine: 'sql' }).cards
+    .some((c) => (c._video?.bvid ?? c.bvid) === 'BV1DUP00001');
+  return (cards.length === 2 && new Set(cards.map((c) => c.id)).size === 2 && hit) || JSON.stringify({ ids: cards.map((c) => c.id), hit });
+});
+
 // ---------------------------------------------------------------- 系列（合集）：fixture，不联网
 const viewFix = {
   bvid: 'BV1SERIES0001',

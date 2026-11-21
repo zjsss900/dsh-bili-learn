@@ -166,9 +166,10 @@ examples/bili-kb/BV1tRxt68EZa/
 ## 测试
 
 ```bash
-node tests/selftest.mjs   # PASS 85 checks   纯函数与知识库门禁（系列进度、多 P 互不覆盖、质检记账与回滚、索引层两条路一致、索引陈旧自愈）
+node tests/selftest.mjs   # PASS 87 checks   纯函数与知识库门禁（系列进度、多 P 互不覆盖、质检记账与回滚、索引层两条路一致、索引陈旧自愈、卡片 id 撞车改名保留）
 node tests/tool-test.mjs  # PASS 12 tools    用假 ctx 驱动 12 个真实工具，验证输出无损
 node tests/db-smoke.mjs   # PASS 22 checks   索引层冒烟：建/镜像/增量/重建/删掉后自动回退 JSON、指纹发现外部写入
+node tests/fix-dup-ids.mjs # 修历史数据：一页内卡片 id 撞车的改名保留两张，顺手重建索引（0.5.2 及之前学到的库可能需要）
 node tests/db-verify.mjs  # 可选：拿你自己的知识库做双跑验收（卡片逐条一致 + 讲稿行 + 待复习 + 计时）
 node tests/relearn.mjs    # 可选：只重跑 status=unread 的段（补提取，按 id 去重追加）
 node tests/judge-live.mjs # 可选：真模型 + 你自己的知识库，验收判定质量（只写缓存，不动卡片）

@@ -20,6 +20,27 @@ export function pageKey(bvid, page = 1) {
   return p > 1 ? `${bvid}_p${p}` : bvid;
 }
 
+/** 一页内卡片 id 撞车会让索引主键冲突、整页写不进去（实测切两半补救撞出 18 张重复 → 34 张卡隐形）。
+ *  这里只改名，两张都保留——删除卡片永远是模型/用户的事，不是存储层的事。 */
+export function uniqueCardIds(cards = []) {
+  const seen = new Set();
+  let renamed = 0;
+  const out = (cards ?? []).map((c) => {
+    const base = String(c?.id ?? '');
+    if (!seen.has(base)) {
+      seen.add(base);
+      return c;
+    }
+    let n = 2;
+    while (seen.has(`${base}-${n}`)) n += 1;
+    const id = `${base}-${n}`;
+    seen.add(id);
+    renamed += 1;
+    return { ...c, id, _idRenamedFrom: base };
+  });
+  return { cards: out, renamed };
+}
+
 /** 回跳链接：多 P 要带 ?p=，否则跳到 P1 的秒数对不上。 */
 export function jumpUrl(url, t, page = 1) {
   const p = Number(page) || 1;
@@ -142,7 +163,9 @@ export class KnowledgeBase {
       removed += 1;
     }
     const ok = skipped.length === 0;
-    if (ok && stamp !== 'none') db.metaSet('stamp', stamp);
+    // 指纹照样落：否则一页永远写不进索引，每次检索都要重扫全库（实测 60 查询从 663ms 退到 13.6s）。
+    // 缺页不靠这里发现——indexStatus 的计数比对会报 consistent=false，bili_index verify 看得见。
+    if (stamp !== 'none') db.metaSet('stamp', stamp);
     return { ok, synced, removed, skipped, reason: ok ? '' : skipped.join('；') };
   }
 
@@ -170,7 +193,7 @@ export class KnowledgeBase {
   /** 全量重建索引（JSON 是真相源，索引只是缓存）。重建完把指纹补上，免得下次检索再补镜像一遍。 */
   rebuildIndex(options) {
     const r = rebuildIndex(this, options);
-    if (r?.ok) {
+    if (r && (r.pages ?? 0) > 0) {
       const db = this.indexDb();
       if (db?.open()) db.metaSet('stamp', this.jsonStamp());
     }
@@ -309,6 +332,9 @@ export class KnowledgeBase {
   /** 写入一个视频的全部产物。 */
   saveVideo({ meta, lines, segments, cards, warnings }) {
     this.ensure();
+    const deduped = uniqueCardIds(cards);
+    if (deduped.renamed > 0 && Array.isArray(warnings)) warnings.push(`卡片 id 冲突已改名 ${deduped.renamed} 张（两张都保留，只改 id）`);
+    cards = deduped.cards;
     const dir = this.videoDir(meta.bvid, meta.page);
     fs.mkdirSync(dir, { recursive: true });
     writeJsonAtomic(path.join(dir, 'source.json'), meta);

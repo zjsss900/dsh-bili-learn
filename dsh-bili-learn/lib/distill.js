@@ -45,7 +45,7 @@ function normalizeCards(raw, { limit, segment }) {
     out.push({
       // id 用分段起点而不是序号：同一视频重新学习时 id 稳定（覆盖而非堆积），
       // 而把一段切成多块补跑时也不会互相覆盖丢卡片。
-      id: `s${Math.round(segment.start)}-${out.length + 1}`,
+      id: `s${Math.round(segment.idAt ?? segment.start)}-${out.length + 1}`,
       kind: ['concept', 'procedure', 'fact', 'caution', 'example'].includes(item.kind) ? item.kind : 'concept',
       title: title.slice(0, 120),
       claim: claim.slice(0, 1200),
@@ -145,8 +145,11 @@ export async function distillSegments({ llm, provider, model, meta, segments, ma
     if (produced.length === 0 && !explicitEmpty && !signal?.aborted && segment.text.length > 900) {
       // 第三道兜底：整段太长 → 切两半分别提，各要 ≤3 张。两半都要跑（各自有自己的知识点，不能只跑前半）
       const cut = breakNear(segment.text, Math.floor(segment.text.length / 2));
+      // 后半段用「时间段中点」做 id 前缀：两半都从 segment.start 起算会撞 id（实测 3 页撞出 18 张重复，
+      // 卡片主键冲突 → 整页写不进索引）。idAt 只影响 id，不影响证据时间校验。
+      const mid = segment.start + (Number(segment.end ?? segment.start) - Number(segment.start)) / 2;
       const a = await runAttempts({ ...segment, text: segment.text.slice(0, cut) }, { cap: 3, tokens: maxTokens * 2 });
-      const b = signal?.aborted ? { produced: [], note: '' } : await runAttempts({ ...segment, text: segment.text.slice(cut) }, { cap: 3, tokens: maxTokens * 2 });
+      const b = signal?.aborted ? { produced: [], note: '' } : await runAttempts({ ...segment, idAt: mid, text: segment.text.slice(cut) }, { cap: 3, tokens: maxTokens * 2 });
       produced = [...a.produced, ...b.produced];
       if (produced.length > 0) {
         rescued = true;
