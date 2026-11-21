@@ -20,7 +20,7 @@
 | 知识散落，无法复用 | `bili_skill` 把若干视频的知识拼成 `SKILL.md` 技能，每条规则挂回跳链接 |
 | 只有某个模型能用 | 提取卡片用哪个模型是可配的（默认当前会话模型，可指向本地模型），不绑定任何厂商 |
 
-## 10 个工具
+## 11 个工具
 
 | 工具 | 作用 |
 |---|---|
@@ -30,6 +30,7 @@
 | `bili_recall` | 在已学知识里检索卡片与讲稿证据（返回时间戳与回跳链接） |
 | `bili_practice` | 复习闭环：`due` 列出待复习卡片，`grade` 记录 ok/miss 并更新熟练度与下次复习时间 |
 | `bili_note` | 由你自己写卡片覆盖自动提取结果（必须带 `evidence` 时间戳） |
+| `bili_filter` | 卡片质检：把卡片交给模型判 `knowledge`/`ad`/`filler`，`scan`/`apply`/`restore`/`stats` |
 | `bili_status` | 知识库总览：学过哪些视频、卡片数、待复习数、告警 |
 | `bili_login` | 扫码登录：出二维码 → 轮询 → 把会话 Cookie 写进 `cookieFile` |
 | `bili_frame` | 按秒抽帧存本地图片，配合视觉模型读画面上的文字与界面 |
@@ -81,6 +82,19 @@
 
 实测（35 P 的《影视导演基础》）：先学 P1（15 张卡），再 `pages:[2,3]` → P1 的 15 张卡与 929 行讲稿**完好无损**；再学 P1 直接 `skipped`，不动别的页。
 
+## 卡片质检：判定交给模型，插件不写正则
+
+B 站教程里混着求三连、加群领资料、卖课优惠、片尾致谢，还有「这个功能很强大」这类没信息量的过渡话。插件**不用正则去猜**这些——判定由模型给，程序只做三件事：成批送判、把结果记账、保证可回滚。
+
+- 学完（`bili_learn`）把这一页的卡片成批（默认 12 张一批）送模型判 `knowledge` / `ad` / `filler`，每张附一句不超过 12 字的理由。
+- 判成 `ad`/`filler` 的卡片从 `cards.json` 移到 `filtered.json`（判定与理由一起存，**没有真删**），`cards.md` 文末列出「已筛掉」清单与原因。
+- 模型判不了的（空正文、漏了 id）**一律保留**，只记 `uncertain`——没有判定就不删。
+- 提示词里写死保守条款：「拿不准就写 knowledge——宁可留下，绝不误删知识」。
+- `bili_filter`：`scan` 预览（判定按卡片指纹缓存进 `judgments.json`，重跑不重复调用）→ `apply` 落账 → `restore` 放回并**钉住**（`pinned.json`，以后重学重筛都不再动它）→ `stats` 汇总全库。
+- 提取阶段就要求模型别产这类卡片；整段只有广告/口水时模型输出 `[]`，该段标 `noise`——与「没读到字幕」的 `unread` 区分开。
+
+真机验收（本机 qwen、真实知识库）：20 页共 168 张卡，22 次调用约 8 分钟，模型挑出 7 张——1 张教程运营计划 + 6 张口水话（如「本段结束景别内容，其他内容以后讲」「掌握这两点即可上手画分镜」），其余 161 张知识卡**零误杀**。另一个样本 4 张卡 1 次调用 9 秒，判掉「评论区扣关键词领模板」那张（理由：评论区领资料引流）。复跑：`node tests/judge-live.mjs <BV号,...>`（单进程串行，只写判定缓存，绝不动卡片）。
+
 ## 安装
 
 1. 把 `dsh-bili-learn/` 放进 DSH 的插件目录（或通过插件管理安装）。插件通过 `cordis.patch.yml` 注册，启动期配置需要重启生效。
@@ -95,6 +109,7 @@
 | `distill` / `distillProvider` / `distillModel` | `true` / 空 / 空 | 提取卡片的模型；留空 = 当前会话默认模型（可以是完全本地的模型） |
 | `segmentMinutes` / `maxCardsPerSegment` | `8` / `5` | 分段长度与每段卡片上限 |
 | `distillMaxTokens` | `2500` | 短输出 + 失败重试一次（思考型模型长输出会翻车） |
+| `judgeAfterLearn` / `judgeBatch` / `judgeMaxTokens` | `true` / `12` / `1600` | 卡片质检：成批送模型判 `ad`/`filler`。判定由模型给，插件里没有任何广告正则 |
 | `maxLearnMinutes` | `0` | `0` = 整段都学；`>0` 只学前 N 分钟 |
 | `injectIndex` | `true` | 把「已学会什么」的紧凑索引注入系统提示 |
 | `qrPython` / `qrPng` | `python` / 空 | 二维码本地渲染（**不把登录令牌交给任何第三方**） |
@@ -138,8 +153,9 @@ examples/bili-kb/BV1tRxt68EZa/
 ## 测试
 
 ```bash
-node tests/selftest.mjs   # PASS 47 checks   纯函数与知识库门禁（含系列进度、多 P 互不覆盖）
-node tests/tool-test.mjs  # PASS 10 tools    用假 ctx 驱动真实工具，验证输出无损
+node tests/selftest.mjs   # PASS 65 checks   纯函数与知识库门禁（系列进度、多 P 互不覆盖、质检记账与回滚）
+node tests/tool-test.mjs  # PASS 11 tools    用假 ctx 驱动 11 个真实工具，验证输出无损
+node tests/judge-live.mjs # 可选：真模型 + 你自己的知识库，验收判定质量（只写缓存，不动卡片）
 ```
 
 CI 每次推送都跑第一个门禁；第二个会真的访问 B 站接口，数据中心 IP 可能被限流，因此允许失败（见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)）。版本记录在 [CHANGELOG.md](CHANGELOG.md)。

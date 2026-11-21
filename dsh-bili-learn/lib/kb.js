@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { formatTime, scoreCard, searchLines, tokenize, topTerms, clip } from './text.js';
+import { applyVerdicts } from './judge.js';
 
 const INDEX_VERSION = 1;
 // 复习间隔（天），下标即熟练度。
@@ -158,7 +159,15 @@ export class KnowledgeBase {
       segments: readJsonSafe(path.join(dir, 'segments.json'), []),
       cards: readJsonSafe(path.join(dir, 'cards.json'), []),
       review: readJsonSafe(path.join(dir, 'review.json'), {}),
+      filtered: readJsonSafe(path.join(dir, 'filtered.json'), []),
+      pinned: readJsonSafe(path.join(dir, 'pinned.json'), []),
+      judgments: readJsonSafe(path.join(dir, 'judgments.json'), {}),
     };
+  }
+
+  /** 用户明确要留下的卡片 id（restore 过），规则永远不再剔它们。 */
+  pinnedIds(bvid, page = 1) {
+    return readJsonSafe(path.join(this.videoDir(bvid, page), 'pinned.json'), []);
   }
 
   /** 写入一个视频的全部产物。 */
@@ -172,7 +181,9 @@ export class KnowledgeBase {
       path.join(dir, 'segments.json'),
       segments.map((s) => ({ index: s.index, start: s.start, end: s.end, chars: s.chars, terms: s.terms ?? [], status: s.status ?? 'pending', note: s.note ?? '' })),
     );
+    // 判定不在这里做（不写规则去猜广告）：卡片原样落盘，质检由 bili_filter 送模型判完再记账。
     writeJsonAtomic(path.join(dir, 'cards.json'), cards);
+    const droppedSoFar = readJsonSafe(path.join(dir, 'filtered.json'), []);
 
     fs.writeFileSync(
       path.join(dir, 'transcript.md'),
@@ -196,7 +207,7 @@ export class KnowledgeBase {
       'utf8',
     );
 
-    fs.writeFileSync(path.join(dir, 'cards.md'), renderCards(meta, cards), 'utf8');
+    fs.writeFileSync(path.join(dir, 'cards.md'), renderCards(meta, cards, droppedSoFar), 'utf8');
     fs.writeFileSync(path.join(dir, 'study.md'), renderStudy(meta, cards, this.load(meta.bvid, meta.page)?.review ?? {}), 'utf8');
 
     this.upsertIndex(
@@ -212,7 +223,7 @@ export class KnowledgeBase {
         coverage: meta.coverage,
         warnings: warnings ?? [],
       },
-      { cards: cards.length, segments: segments.length, lines: lines.length },
+      { cards: cards.length, segments: segments.length, lines: lines.length, dropped: droppedSoFar.length },
     );
     if (meta.series?.key) {
       this.tagVideoSeries(meta.bvid, { key: meta.series.key, index: meta.series.index ?? 0, total: meta.series.total ?? 0, title: meta.series.title ?? '' }, { page: meta.page ?? 1 });
@@ -245,10 +256,56 @@ export class KnowledgeBase {
     const merged = [...byId.values()];
     const dir = this.videoDir(bvid, page);
     writeJsonAtomic(path.join(dir, 'cards.json'), merged);
-    fs.writeFileSync(path.join(dir, 'cards.md'), renderCards(existing.meta, merged), 'utf8');
+    fs.writeFileSync(path.join(dir, 'cards.md'), renderCards(existing.meta, merged, existing.filtered ?? []), 'utf8');
     fs.writeFileSync(path.join(dir, 'study.md'), renderStudy(existing.meta, merged, existing.review), 'utf8');
-    this.upsertIndex({ bvid, page }, { cards: merged.length });
+    this.upsertIndex({ bvid, page }, { cards: merged.length, dropped: (existing.filtered ?? []).length });
     return merged.length;
+  }
+
+  /**
+   * 把模型判定落账：ad/filler 移到 filtered.json（带模型的 verdict 与 reason），其余留在 cards.json。
+   * 判定本身来自 lib/judge.js（模型），这里只记账 + 重写视图。
+   */
+  applyJudgments(bvid, { page = 1, verdicts = {}, drop = ['ad', 'filler'] } = {}) {
+    const store = this.load(bvid, page);
+    if (!store?.meta) throw new Error(`知识库里没有 ${bvid}`);
+    const pass = applyVerdicts(store.cards, verdicts, { drop, pinned: store.pinned ?? [] });
+    const droppedById = new Map([...(store.filtered ?? []), ...pass.dropped].map((c) => [c.id, c]));
+    const dir = this.videoDir(bvid, page);
+    writeJsonAtomic(path.join(dir, 'cards.json'), pass.kept);
+    writeJsonAtomic(path.join(dir, 'filtered.json'), [...droppedById.values()]);
+    fs.writeFileSync(path.join(dir, 'cards.md'), renderCards(store.meta, pass.kept, [...droppedById.values()]), 'utf8');
+    fs.writeFileSync(path.join(dir, 'study.md'), renderStudy(store.meta, pass.kept, store.review), 'utf8');
+    this.upsertIndex({ bvid, page }, { cards: pass.kept.length, dropped: droppedById.size });
+    return { kept: pass.kept.length, removed: pass.dropped, uncertain: pass.uncertain, stats: pass.stats, stored: droppedById.size };
+  }
+
+  /** 缓存模型判定（省下一次同样的调用），按卡片指纹失效。 */
+  saveJudgments(bvid, judgments, { page = 1 } = {}) {
+    const dir = this.videoDir(bvid, page);
+    const merged = { ...readJsonSafe(path.join(dir, 'judgments.json'), {}), ...(judgments ?? {}) };
+    writeJsonAtomic(path.join(dir, 'judgments.json'), merged);
+    return Object.keys(merged).length;
+  }
+
+  /** 把被筛掉的卡片放回 cards.json（用户说「这张不是广告」时用）。 */
+  restoreCards(bvid, ids, { page = 1 } = {}) {
+    const store = this.load(bvid, page);
+    if (!store?.meta) throw new Error(`知识库里没有 ${bvid}`);
+    const wanted = new Set(ids ?? []);
+    const back = (store.filtered ?? []).filter((c) => wanted.has(c.id)).map(({ _verdict, _reasons, ...card }) => card);
+    if (back.length === 0) return { restored: 0, available: (store.filtered ?? []).map((c) => ({ id: c.id, title: c.title, verdict: c._verdict, reasons: c._reasons })) };
+    const byId = new Map([...store.cards, ...back].map((c) => [c.id, c]));
+    const dir = this.videoDir(bvid, page);
+    writeJsonAtomic(path.join(dir, 'cards.json'), [...byId.values()]);
+    writeJsonAtomic(path.join(dir, 'filtered.json'), (store.filtered ?? []).filter((c) => !wanted.has(c.id)));
+    // 放回即钉住：以后重学/重筛都不再剔这张（用户的判断优先于规则）。
+    const pins = [...new Set([...(store.pinned ?? []), ...back.map((c) => c.id)])];
+    writeJsonAtomic(path.join(dir, 'pinned.json'), pins);
+    fs.writeFileSync(path.join(dir, 'cards.md'), renderCards(store.meta, [...byId.values()], (store.filtered ?? []).filter((c) => !wanted.has(c.id))), 'utf8');
+    fs.writeFileSync(path.join(dir, 'study.md'), renderStudy(store.meta, [...byId.values()], store.review), 'utf8');
+    this.upsertIndex({ bvid, page }, { cards: byId.size, dropped: (store.filtered ?? []).length - back.length });
+    return { restored: back.length, ids: back.map((c) => c.id), pinned: pins };
   }
 
   /** 记录复习结果，更新熟练度与下次到期时间。 */
@@ -385,12 +442,12 @@ export class KnowledgeBase {
 
 function evidenceLinks(meta, card) {
   return (card.evidence ?? [])
-    .map((e) => `  - [${formatTime(e.t)}] ${clip(e.quote, 160)} → ${meta.url}?t=${Math.floor(e.t)}`)
+    .map((e) => `  - [${formatTime(e.t)}] ${clip(e.quote, 160)} → ${jumpUrl(meta.url, e.t, meta.page ?? 1)}`)
     .join('\n');
 }
 
-function renderCards(meta, cards) {
-  const head = `# 知识卡片：${meta.title}\n\n- 视频：${meta.url}\n- UP：${meta.owner}｜时长：${formatTime(meta.duration)}\n- 卡片数：${cards.length}\n`;
+function renderCards(meta, cards, dropped = []) {
+  const head = `# 知识卡片：${meta.title}\n\n- 视频：${meta.url}\n- UP：${meta.owner}｜时长：${formatTime(meta.duration)}\n- 卡片数：${cards.length}${dropped.length ? `｜已筛掉 ${dropped.length} 张（广告/引流/口水话，理由见文末，可回滚）` : ''}\n`;
   const body = cards
     .map((card) => {
       const parts = [`\n## ${card.title}`, `- 类型：${card.kind}｜置信度：${card.confidence}｜来源：${card.source}`];
@@ -402,7 +459,12 @@ function renderCards(meta, cards) {
       return parts.join('\n');
     })
     .join('\n');
-  return `${head}${body}\n`;
+  const tail = dropped.length
+    ? `\n\n## 已筛掉（不进复习与检索）\n\n${dropped
+        .map((c) => `- [${c.id}] ${c.title}｜${c._verdict ?? '噪声'}：${(c._reasons ?? []).join('、')}\n  - 结论：${clip(c.claim, 120)}\n  - 当时的证据：${clip((c.evidence ?? [])[0]?.quote ?? '', 120)}`)
+        .join('\n')}\n\n> 这张判错了？用 \`bili_filter action=restore\` 放回（卡片存在 filtered.json，没有真删）。\n`
+    : '';
+  return `${head}${body}${tail}\n`;
 }
 
 function renderStudy(meta, cards, review) {

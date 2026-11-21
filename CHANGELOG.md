@@ -3,6 +3,43 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-11-22
+
+### 新增 / Added
+
+- **卡片质检（第 11 个工具 `bili_filter`）**：广告、引流、求三连、片尾致谢、「这个功能很强大」这类口水话，
+  **判定交给模型**，插件不写一条广告正则。学完把卡片成批（默认 12 张）送模型判
+  `knowledge`/`ad`/`filler`，每张附不超过 12 字的理由；`scan` 预览 → `apply` 落账 → `restore` 放回并钉住 → `stats` 汇总
+  / Card quality control: the model judges, the plugin only books the result
+- **三个新落盘文件** — `judgments.json`（按卡片指纹缓存的判定，重跑零调用）、`filtered.json`（被剔卡片连判定与理由一起存，
+  可回滚，绝不静默删除）、`pinned.json`（用户 `restore` 回来并钉住的卡片，之后重学重筛都不再动它）
+- **诚实边界** — 模型判不了（空正文、漏了 id）的卡片一律保留并记 `uncertain`：没有判定就没有删除。
+  提示词写死保守条款「拿不准就写 knowledge——宁可留下，绝不误删知识」
+- **提取阶段同步收紧** — 要求模型自己别产这类卡片；整段只有广告/口水时输出 `[]`，该段标 `noise`，
+  与「没拿到字幕」的 `unread` 明确区分
+  / Segment-level `noise` status, distinct from `unread`
+- **配置** — `judgeAfterLearn` / `judgeBatch` / `judgeMaxTokens`（默认 `true` / `12` / `1600`）；`bili_learn` 新增 `judge` 参数可单独关掉
+
+### 变更 / Changed
+
+- 撤掉上一版实验里的**正则判类**：实测它会把「秩=主元个数」这类极简真卡误判成口水话。
+  现在判定一律由模型给，程序只做送判、记账、回滚三件事；`lib/filter.js` 已删除
+  / The experimental regex classifier is gone — judgment belongs to the model
+
+### 门禁 / Gates
+
+- `tests/selftest.mjs` 47 → **65 项**：新增 18 项质检管线用例（假模型送判、缓存命中零调用、`pinned` 不送判、
+  模型漏 id → 保留并标 `uncertain`、空正文 → 全部保留并报 `unjudged`、`applyJudgments` 落账与 `restore` 回滚、
+  `cards.md` 的「已筛掉」附录、断言仓库里不存在正则判定模块）
+- `tests/tool-test.mjs` 覆盖 **11 个工具**，含 `bili_filter` 全链：scan → 缓存命中 → apply → stats → restore → 钉住后不再被剔
+
+### 实测 / Measured
+
+- 真实知识库 20 页 / 168 张卡：22 次本地调用约 8 分钟，模型挑出 7 张（1 张教程运营计划 + 6 张口水话，
+  如「本段结束景别内容，其他内容以后讲」），其余 161 张知识卡**零误杀**
+- 另一样本 4 张卡、1 次调用、9 秒：判掉「评论区扣关键词领模板」（理由：评论区领资料引流），其余保留
+  / Reproducible with `node tests/judge-live.mjs <BV号,...>`（verdict cache only, never touches cards）
+
 ## [0.3.0] - 2026-11-07
 
 ### 修复 / Fixed

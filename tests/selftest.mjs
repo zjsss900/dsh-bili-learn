@@ -180,14 +180,14 @@ check('stats lists series progress', () => {
 
 // ---------------------------------------------------------------- 多 P：按页分开存，互不覆盖
 const multi = { ...meta, bvid: 'BVDEMO000011', title: '多P课程', duration: 600 };
-kb.saveVideo({ meta: { ...multi, page: 1, part: 'P1 导论' }, lines: lines.slice(0, 5), segments: segs.slice(0, 1), cards: [{ id: 'm1', title: 'P1 要点', claim: '第一页的结论', evidence: [{ t: 10, quote: 'q' }] }], warnings: [] });
-kb.saveVideo({ meta: { ...multi, page: 2, part: 'P2 进阶' }, lines: lines.slice(0, 3), segments: segs.slice(0, 1), cards: [{ id: 'm2', title: 'P2 要点', claim: '第二页的结论', evidence: [{ t: 20, quote: 'q' }] }], warnings: [] });
+kb.saveVideo({ meta: { ...multi, page: 1, part: 'P1 导论' }, lines: lines.slice(0, 5), segments: segs.slice(0, 1), cards: [{ id: 'm1', title: 'P1 要点', claim: '第一页把导演的职责拆成现场与后期两段', how: ['现场盯调度', '后期盯剪辑'], evidence: [{ t: 10, quote: '第一页先把职责拆开讲' }] }], warnings: [] });
+kb.saveVideo({ meta: { ...multi, page: 2, part: 'P2 进阶' }, lines: lines.slice(0, 3), segments: segs.slice(0, 1), cards: [{ id: 'm2', title: 'P2 要点', claim: '第二页讲类型片要先立观众预期', how: ['先列类型', '再列预期'], evidence: [{ t: 20, quote: '第二页讲类型与预期' }] }], warnings: [] });
 check('multi-P: P1 files survive after learning P2', () => fs.existsSync(path.join(dir, 'BVDEMO000011', 'cards.json')) && fs.existsSync(path.join(dir, 'BV1MULTI0001_p2', 'cards.json')));
 check('multi-P: both pages keep their own cards', () => (kb.load('BVDEMO000011', 1).cards.length === 1 && kb.load('BVDEMO000011', 2).cards.length === 1) || 'cards lost');
 check('multi-P: index lists every page', () => kb.pagesOf('BVDEMO000011').map((v) => v.page).join(',') === '1,2' || JSON.stringify(kb.pagesOf('BVDEMO000011')));
 check('multi-P: saveCards targets one page only', () => {
   kb.saveVideo({ meta: { ...multi, page: 3, part: 'P3 实战' }, lines: lines.slice(0, 2), segments: segs.slice(0, 1), cards: [], warnings: [] });
-  kb.saveCards('BVDEMO000011', [{ id: 'm3', title: '补 P3', claim: '第三页', evidence: [{ t: 5, quote: 'q' }] }], { page: 3 });
+  kb.saveCards('BVDEMO000011', [{ id: 'm3', title: '补 P3', claim: '第三页补的是档期选择', how: ['看春节档', '避开强片'], evidence: [{ t: 5, quote: '第三页补档期' }] }], { page: 3 });
   return (kb.load('BVDEMO000011', 3).cards.length === 1 && kb.load('BVDEMO000011', 1).cards.length === 1) || 'page leak';
 });
 check('multi-P: dueCards spans all pages', () => {
@@ -210,6 +210,83 @@ check('multi-P: skill links carry ?p= for page 2', () => {
     cards: [{ kind: 'concept', title: 'c', claim: 'x', evidence: [{ t: 42, quote: 'q' }], _bvid: 'BVDEMO000011', _page: 2 }],
   });
   return (built.includes('?p=2&t=42') && built.includes('P2 进阶')) || built.slice(0, 200);
+});
+
+// ---------------------------------------------------------------- 卡片质检：判定由模型给，程序只记账
+const junkCards = [
+  { id: 'k1', title: '求支持', claim: '觉得有用请一键三连支持一下', evidence: [{ t: 5, quote: '觉得有用一键三连' }, { t: 9, quote: '感谢大家观看，我们下期见' }], how: [] },
+  { id: 'k2', title: '领资料', claim: '加群领取课件素材', why: '群里发链接', evidence: [{ t: 12, quote: '加粉丝群领取课件，QQ群在简介区' }], how: ['进群'] },
+  { id: 'k3', title: '开场', claim: '今天我们来学一下', evidence: [{ t: 1, quote: '今天我们来学一下' }], how: [] },
+  { id: 'k4', title: '景别三段式', claim: '先全景定场再中焦叙事最后特写强调', why: '观众先建立空间再读情绪', how: ['全景 2s', '中景 4s'], evidence: [{ t: 40, quote: '先给全景让观众知道空间关系' }] },
+];
+const judgeMod = await import(root + 'lib/judge.js');
+// 假模型：真的按 prompt 里的 id 返回判定（门禁测的是送判/记账/诚实回滚这条管线，不是模型判断力——
+// 判断力靠真机跑真知识库验收）。
+const judgeStub = {
+  calls: 0,
+  replies: () => [{ verdict: 'ad', reason: '求三连' }, { verdict: 'knowledge', reason: '' }, { verdict: 'filler', reason: '开场白' }, { verdict: 'knowledge', reason: '' }],
+  async *stream({ system, messages }) {
+    judgeStub.calls += 1;
+    const user = (messages?.[0]?.content ?? []).map((c) => c.text ?? '').join('');
+    if (String(system ?? '').includes('质检员')) {
+      const ids = [...user.matchAll(/id=([A-Za-z0-9_-]+)/g)].map((m) => m[1]);
+      const table = judgeStub.replies();
+      yield { type: 'text-delta', index: 0, text: JSON.stringify(ids.map((id, i) => ({ id, ...table[i % table.length] }))) };
+      yield { type: 'finish', index: 0, reason: { kind: 'stop' } };
+      return;
+    }
+    yield { type: 'text-delta', index: 0, text: '[]' };
+    yield { type: 'finish', index: 0, reason: { kind: 'stop' } };
+  },
+};
+const jr = await judgeMod.judgeCards({ llm: judgeStub, provider: 'x', model: 'y', cards: junkCards, batchSize: 12 });
+check('judge: verdicts come from the model', () => (jr.verdicts.k1.verdict === 'ad' && jr.verdicts.k3.verdict === 'filler' && jr.verdicts.k4.verdict === 'knowledge' && jr.calls === 1) || JSON.stringify({ v: jr.verdicts, calls: jr.calls }));
+const jr2 = await judgeMod.judgeCards({ llm: judgeStub, provider: 'x', model: 'y', cards: junkCards, cache: jr.verdicts });
+check('judge: same cards hit the cache, zero extra model calls', () => (jr2.calls === 0 && jr2.fromCache === 4) || JSON.stringify({ calls: jr2.calls, fromCache: jr2.fromCache }));
+const jr3 = await judgeMod.judgeCards({ llm: judgeStub, provider: 'x', model: 'y', cards: junkCards, pinned: ['k1'] });
+check('judge: pinned card is not even sent for judgment', () => (jr3.verdicts.k1.by === 'pin' && jr3.calls === 1) || JSON.stringify({ k1: jr3.verdicts.k1, calls: jr3.calls }));
+const ap = judgeMod.applyVerdicts(junkCards, jr.verdicts);
+check('judge: apply keeps knowledge, drops ad+filler with the model reason', () => (ap.kept.map((c) => c.id).join(',') === 'k2,k4' && ap.dropped[0]._verdict === 'ad' && ap.dropped[0]._reasons[0] === '求三连') || JSON.stringify({ kept: ap.kept.map((c) => c.id), d: ap.dropped.map((c) => [c._verdict, c._reasons]) }));
+const partial = await judgeMod.judgeCards({ llm: { async *stream() { yield { type: 'text-delta', index: 0, text: '[{"id":"k1","verdict":"ad","reason":"求三连"}]' }; yield { type: 'finish', index: 0, reason: { kind: 'stop' } }; } }, provider: 'x', model: 'y', cards: junkCards });
+check('judge: ids the model skipped are kept and marked uncertain', () => (partial.unjudged.length === 3 && judgeMod.applyVerdicts(junkCards, partial.verdicts).kept.length === 3) || JSON.stringify({ unjudged: partial.unjudged }));
+const silent = await judgeMod.judgeCards({ llm: { async *stream() { yield { type: 'reasoning-delta', index: 0, text: '嗯嗯嗯' }; yield { type: 'finish', index: 0, reason: { kind: 'max-tokens' } }; } }, provider: 'x', model: 'y', cards: junkCards });
+check('judge: empty model output → nothing dropped, reported unjudged', () => (silent.unjudged.length === 4 && silent.calls === 2 && judgeMod.applyVerdicts(junkCards, silent.verdicts).kept.length === 4) || JSON.stringify({ unjudged: silent.unjudged.length, calls: silent.calls }));
+kb.saveVideo({ meta: { ...meta, bvid: 'BVDEMO000017' }, lines, segments: segs, cards: junkCards, warnings: [] });
+check('judge: saveVideo keeps every card (no programmatic pre-judgment)', () => kb.load('BVDEMO000017').cards.length === 4 || JSON.stringify(kb.load('BVDEMO000017').cards.length));
+const applied = kb.applyJudgments('BVDEMO000017', { verdicts: jr.verdicts });
+check('judge: applyJudgments moves the judged cards to filtered.json', () => (applied.kept === 2 && kb.load('BVDEMO000017').filtered.length === 2) || JSON.stringify({ kept: applied.kept, filtered: kb.load('BVDEMO000017').filtered.length }));
+check('judge: filtered card carries the model verdict and reason', () => {
+  const f = kb.load('BVDEMO000017').filtered.find((c) => c.id === 'k1');
+  return (f._verdict === 'ad' && f._reasons[0] === '求三连' && f._by === 'model') || JSON.stringify(f);
+});
+check('judge: cards.md lists what was dropped and why', () => fs.readFileSync(path.join(dir, 'BVDEMO000017', 'cards.md'), 'utf8').includes('已筛掉'));
+const saved = kb.saveJudgments('BVDEMO000017', jr.verdicts);
+check('judge: verdicts cached per page', () => (saved === 4 && Object.keys(kb.load('BVDEMO000017').judgments).length === 4) || JSON.stringify(saved));
+const restored = kb.restoreCards('BVDEMO000017', ['k3']);
+check('judge: restore puts the card back and pins it', () => {
+  const s = kb.load('BVDEMO000017');
+  return (restored.restored === 1 && s.cards.length === 3 && s.filtered.length === 1 && s.pinned.includes('k3')) || JSON.stringify({ r: restored, cards: s.cards.length, filtered: s.filtered.length, pinned: s.pinned });
+});
+check('judge: replying the same verdicts keeps the pinned card', () => {
+  const again = kb.applyJudgments('BVDEMO000017', { verdicts: jr.verdicts });
+  return (again.kept === 3 && kb.load('BVDEMO000017').cards.some((c) => c.id === 'k3')) || JSON.stringify({ kept: again.kept });
+});
+check('no programmatic classifier module (judgment must be the model)', () => !fs.existsSync(new URL('lib/filter.js', root)), 'lib/filter.js 还在');
+const stubCalls = { n: 0 };
+const stubLlm = { async *stream() { stubCalls.n += 1; yield { type: 'text-delta', index: 0, text: '[]' }; yield { type: 'finish', index: 0, reason: { kind: 'stop' } }; } };
+const adSeg = { index: 0, start: 0, end: 60, text: '感谢本期的赞助商，加QQ群领取资料，一键三连', lines: [{ t: 0, text: '感谢本期的赞助商，加QQ群领取资料，一键三连' }] };
+await distill.distillSegments({ llm: stubLlm, provider: 'x', model: 'y', meta: { title: 't' }, segments: [adSeg], maxTokens: 200 });
+check('distill: an ad-heavy segment still goes to the model (no regex pre-judgment)', () => (stubCalls.n >= 1 && adSeg.status === 'noise') || `calls=${stubCalls.n} status=${adSeg.status}`);
+const emptySeg = { index: 1, start: 100, end: 160, text: '我们讲讲镜头的轴线', lines: [{ t: 100, text: '我们讲讲镜头的轴线' }] };
+await distill.distillSegments({ llm: stubLlm, provider: 'x', model: 'y', meta: { title: 't' }, segments: [emptySeg], maxTokens: 200 });
+check('distill: [] from model means noise, not unread, and no retry', () => (emptySeg.status === 'noise' && stubCalls.n === 2) || `status=${emptySeg.status} calls=${stubCalls.n}`);
+check('distill prompt tells the model to skip ads/filler', () => {
+  const src = fs.readFileSync(new URL('lib/distill.js', root), 'utf8');
+  return (src.includes('不要出这些卡片') && src.includes('三连') && src.includes('输出 []')) || '提示词没有降噪规则';
+});
+check('judge prompt says: when unsure keep it', () => {
+  const src = fs.readFileSync(new URL('lib/judge.js', root), 'utf8');
+  return (src.includes('宁可留下') && src.includes('绝不误删知识')) || '质检提示词没有保守条款';
 });
 
 console.log(failures.length === 0 ? `PASS ${total} checks` : `FAIL ${failures.length}/${total}\n- ${failures.join('\n- ')}`);

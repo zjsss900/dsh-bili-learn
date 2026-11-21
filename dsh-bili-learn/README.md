@@ -35,6 +35,9 @@ plugin_manager: action=install_bundle, target=<本地路径>/dsh-bili-learn
 | `segmentMinutes` | 8 | 分段粒度 |
 | `maxCardsPerSegment` | 5 | 每段最多几张卡片 |
 | `distillMaxTokens` | 1400 | 本地思考型模型长输出会翻车，短输出 + 失败重试一次 |
+| `judgeAfterLearn` | `true` | 学完把卡片成批送模型质检（广告/引流/口水话）。判定由模型给，插件不写正则猜 |
+| `judgeBatch` | 12 | 每次送判的卡片数（本地模型要小批量、短输出） |
+| `judgeMaxTokens` | 1600 | 每次质检的 maxTokens；判定输出很短，够 |
 | `maxLearnMinutes` | 0 | 0 = 整段都学 |
 | `injectIndex` | `true` | 把「已学会 N 个视频」的紧凑索引注入系统提示 |
 
@@ -73,6 +76,7 @@ ffmpeg 从哪来：config 的 `ffmpeg` → PATH 上的 `ffmpeg` → `pip install
 | `bili_series` | 同一 UP 主的系列教程：`find`/`list`/`next`/`learn`/`cluster` |
 | `bili_recall` | 检索已学会的卡片与讲稿证据（带时间戳、回跳链接） |
 | `bili_note` | 由模型/用户手写卡片，覆盖同 id |
+| `bili_filter` | 卡片质检：送模型判「知识 / 广告引流 / 口水话」，`scan`/`apply`/`restore`/`stats` |
 | `bili_practice` | `due` 取待复习卡片；`grade` 记录 ok/miss，驱动间隔复习 |
 | `bili_status` | 知识库总览与告警 |
 | `bili_login` | 扫码登录：出二维码 → 轮询 → 把 Cookie 写进 cookieFile |
@@ -139,9 +143,25 @@ $DSH_HOME/bili-kb/
     cards.json / cards.md    # 知识卡片：结论 / 为什么 / 怎么做 / 证据时间戳
     study.md                 # 学习契约：自测提问 + 应用任务
     review.json              # 熟练度与下次复习时间
+    judgments.json           # 模型对每张卡的判定（knowledge/ad/filler + 理由，按卡片指纹缓存）
+    filtered.json            # 被模型判成广告/口水而剔掉的卡片，连判定与理由一起存，可回滚
+    pinned.json              # 用户 restore 回来、明确要留的卡片 id，规则不再动它们
   BVxxxxxxxx_p2/             # 多 P 的第 2 页起各存一份（P1 仍是 BVxxxxxxxx/）
   BVxxxxxxxx/frames/         # bili_frame 抽出来的画面
 ```
+
+## 卡片质检：判定交给模型，不写正则
+
+B 站教程里混着求三连、加群领资料、卖课、片尾致谢，以及「这个功能很强大」这类没信息量的过渡话。插件**不用正则去猜**这些——判定由模型给，程序只做送判、记账、回滚三件事。
+
+- 学完（`bili_learn`）自动把这一页的卡片成批（默认 12 张一批）送模型判：`knowledge` / `ad` / `filler`，每张附一句不超过 12 字的理由。
+- 判成 `ad`/`filler` 的卡片从 `cards.json` 移到 `filtered.json`（判定与理由一起存，**没有真删**），`cards.md` 文末列出「已筛掉」清单与原因。
+- 判不了（模型空正文、漏了 id）的卡片**一律保留**，只记 `uncertain`——没有判定就不删。
+- 保守条款写在提示词里：「拿不准就写 knowledge——宁可留下，绝不误删知识」。
+- `bili_filter`：`scan` 预览（判过的走 `judgments.json` 缓存，不重复调用）→ `apply` 落账 → `restore` 放回并**钉住**（`pinned.json`，以后重学重筛都不再删）→ `stats` 汇总全库。
+- 提取阶段也要求模型自己别产这类卡片；整段只有广告/口水时模型输出 `[]`，该段标 `noise`（区别于「没读到」的 `unread`）。
+
+真机验收（本机 qwen，真实知识库）：[BVDEMO000012] 4 张卡，9 秒、1 次调用，判掉 `领取萌宠脚本模板`（理由「评论区领资料引流」），其余 3 张保留。判定质量用 `tests/judge-live.mjs` 复跑（单进程串行、直连本地服务、只写缓存不动卡片）。
 
 ## 实测边界（2026-11，本机匿名）
 
@@ -165,17 +185,19 @@ $DSH_HOME/bili-kb/
 
 ```
 1. bili_learn(url)                      # 看 coverage 和 warnings，别只看 cards 数
-2. 读 cards.md，对照 transcript.md 复核 → bili_note 修正
-3. bili_practice(action=due) → 自测 → action=grade 记录
-4. 以后做相关任务：先 bili_recall(query)
+2. bili_filter(action=scan, bvid=…)     # 看模型判成广告/口水的是哪些、理由是什么
+3. 读 cards.md，对照 transcript.md 复核 → bili_note 修正；判错了 bili_filter restore 放回
+4. bili_practice(action=due) → 自测 → action=grade 记录
+5. 以后做相关任务：先 bili_recall(query)
 ```
 
-第 2 步不是可选项：自动提取（尤其本地模型）会漏、会含糊，模型自己复核后写的卡片质量明显更高。
+第 3 步不是可选项：自动提取（尤其本地模型）会漏、会含糊，模型自己复核后写的卡片质量明显更高。质检同理——它只是把可疑的挑出来给你看，判错了 restore 回来，别指望全自动。
 
 ## 自检
 
 ```bash
-node .tools/selftest.mjs     # 24 项：分段/文稿解析/知识库/复习/字幕格式/提取器两条路径
-node .tools/tool-test.mjs    # 用假 ctx 直接跑 6 个工具，校验输出是 lossless JSON
+node tests/selftest.mjs     # 65 项：分段/文稿/知识库/复习/字幕/提取器两条路径/质检记账与回滚
+node tests/tool-test.mjs    # 用假 ctx 跑全部 11 个工具，校验输出是 lossless JSON
+node tests/judge-live.mjs   # 真模型 + 真知识库验收判定（只写缓存，不动卡片）
 ```
 

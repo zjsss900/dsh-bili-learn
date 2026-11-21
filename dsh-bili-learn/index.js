@@ -10,6 +10,7 @@ import path from 'node:path';
 import { BiliClient, normalizeCookie, parsePageIndex, parseVideoRef } from './lib/bili.js';
 import { KnowledgeBase, defaultKbRoot, jumpUrl, pageKey } from './lib/kb.js';
 import { distillSegments } from './lib/distill.js';
+import { applyVerdicts, judgeCards } from './lib/judge.js';
 import { grabFrame, playurlMp4, resolveFfmpeg } from './lib/frames.js';
 import { buildSkill, slugify, writeSkill } from './lib/skill.js';
 import { pollQrLogin, renderQrPng, startQrLogin, whoami, writeCookieFile } from './lib/login.js';
@@ -40,6 +41,10 @@ const DEFAULTS = {
   segmentMinutes: 8,
   maxCardsPerSegment: 5,
   distillMaxTokens: 2500,
+  // 质检（判定交给模型，不用正则）：学完把卡片成批送模型判广告/口水话。
+  judgeAfterLearn: true,
+  judgeBatch: 12,
+  judgeMaxTokens: 1600,
   maxLearnMinutes: 0,
   injectIndex: true,
 };
@@ -50,9 +55,11 @@ const SKILL_BODY = `# B 站视频学习闭环（dsh-bili-learn）
 
 ## 工具
 - \`bili_search\`：按关键词找候选视频（匿名可用）。
-- \`bili_learn\`：读视频 → 讲稿（带时间戳）→ 分段大纲 → 知识卡片，落盘到知识库。
+- \`bili_learn\`：读视频 → 讲稿（带时间戳）→ 分段大纲 → 知识卡片，落盘到知识库。多 P 用 \`pages\` / \`all_pages\` 批量学，一页一目录。
+- \`bili_series\`：学「同一 UP 主的同一系列教程」——find 反查合集与全部集数、list 列 UP 主的合集、next 取下一集、learn 按顺序连学、cluster 按标题前缀聚组。
 - \`bili_recall\`：按问题检索已学会的卡片与讲稿证据（返回时间戳和回跳链接）。
 - \`bili_note\`：由你（模型）直接写/改知识卡片。
+- \`bili_filter\`：卡片质检——把卡片交给模型判是不是广告/引流/口水话（scan 预览 → apply 落账 → restore 放回并钉住 → stats 汇总）。判定是模型给的，插件不用正则猜。
 - \`bili_practice\`：列出待复习卡片（\`due\`）、记录自测结果（\`grade\`），驱动间隔复习。
 - \`bili_status\`：知识库总览（学了哪些、卡片数、待复习数、告警）。
 - \`bili_login\`：扫码登录 B 站（action=start 出二维码 → 用户扫码 → action=poll 写入 Cookie）。读字幕需要登录态。
@@ -65,15 +72,16 @@ const SKILL_BODY = `# B 站视频学习闭环（dsh-bili-learn）
    - 用户手上有文稿 → 直接传 \`transcript_path\` / \`transcript_text\`。
 2. **多 P 合集（一门课几十 P）**：\`bili_learn\` 传 \`pages:[1,2,3]\` 或 \`all_pages:true\` 批量学。每页各存各的目录（P1=\`<bvid>/\`，P2=\`<bvid>_p2/\`），**不会互相覆盖**；\`bili_note\` / \`bili_practice\` 要带 \`page\`；\`bili_recall\` 传 bvid 会跨页检索，回跳链接自动带 \`?p=\`；\`bili_skill\` 传这个 bvid 会把所有已学页汇总成一个技能。
 3. **同一 UP 主的系列教程**：给系列里任意一集跑 \`bili_series\`（action=find）→ 拿到合集标题、全部集数、已学/未学；再 action=learn 按顺序连学（默认 3 集，用 limit 调）。稿件不在任何合集时 action=cluster 按标题前缀聚组。整个系列学完后 \`bili_skill\` 传 \`series\` 一次出技能。
-3. **画面比字幕多信息**：讲稿里出现「看这个画面 / 如图所示 / 参数如下 / 核心提示词：…」，或卡片涉及界面操作、参数、对比效果时，用 \`bili_frame\` 按 evidence 的秒数抽帧，再 \`read_image\` 看。实测教程视频会把提示词原文、参数、UI 只画在画面上，语音字幕里没有。
-3. 提取完成后，**自己复核卡片**：读 \`cards.md\`，对照 \`transcript.md\` 的时间锚点，用 \`bili_note\` 修正含糊、错误或缺失的卡片（模型自己写的卡片比自动提取更可靠）。发现整片字幕与主题无关（如无旁白的效果展示片）→ 用 \`bili_note\` 的 \`replace: true\` 换成诚实的说明卡。
-4. 用 \`bili_practice\`（action=due）取待复习卡片，逐张自测：先不看答案复述「结论/为什么/怎么做」，再用 action=grade 记录 ok/miss。
-5. 想把知识变成可复用能力：\`bili_skill\` 把若干视频的卡片组装成 SKILL.md（写进技能目录，每条挂回跳链接），然后**读一遍并精修**措辞、合并重复、补上与其他技能的分工。技能需要重启或新会话才会出现在技能列表。
-6. 之后任何相关任务，先 \`bili_recall\` 检索知识库（或直接用生成的技能），再据此作答或写代码，并说明依据来自哪个时间点。
+4. **画面比字幕多信息**：讲稿里出现「看这个画面 / 如图所示 / 参数如下 / 核心提示词：…」，或卡片涉及界面操作、参数、对比效果时，用 \`bili_frame\` 按 evidence 的秒数抽帧，再 \`read_image\` 看。实测教程视频会把提示词原文、参数、UI 只画在画面上，语音字幕里没有。
+5. 提取完成后，**自己复核卡片**：读 \`cards.md\`，对照 \`transcript.md\` 的时间锚点，用 \`bili_note\` 修正含糊、错误或缺失的卡片（模型自己写的卡片比自动提取更可靠）。发现整片字幕与主题无关（如无旁白的效果展示片）→ 用 \`bili_note\` 的 \`replace: true\` 换成诚实的说明卡。
+6. **质检（判定交给模型，不是正则）**：学完插件会把卡片成批送模型判「知识 / 广告引流 / 口水话」，判成后两者的卡片移到 \`filtered.json\`（带模型给的 verdict 与理由），\`cards.md\` 文末列出。复查用 \`bili_filter\`：scan 预览（判过的走缓存不重复调用）→ apply 落账 → restore 放回并钉住 → stats 汇总。模型判不了的卡片一律保留并记 \`uncertain\`，绝不删。
+7. 用 \`bili_practice\`（action=due）取待复习卡片，逐张自测：先不看答案复述「结论/为什么/怎么做」，再用 action=grade 记录 ok/miss。
+8. 想把知识变成可复用能力：\`bili_skill\` 把若干视频的卡片组装成 SKILL.md（写进技能目录，每条挂回跳链接），然后**读一遍并精修**措辞、合并重复、补上与其他技能的分工。技能需要重启或新会话才会出现在技能列表。
+9. 之后任何相关任务，先 \`bili_recall\` 检索知识库（或直接用生成的技能），再据此作答或写代码，并说明依据来自哪个时间点。
 
 ## 诚实规则
 - 卡片必须有时间戳证据；没有证据的判断标 \`confidence: low\` 或直接不写。
-- 分段状态是 \`unread\` 的，明确告诉用户「这段没读懂」，不要用它做结论。
+- 分段状态是 \`unread\` 的，明确告诉用户「这段没读懂」，不要用它做结论；状态是 \`noise\` 的，说明整段只有广告/口水话，本来就没有知识点。
 - 引用知识库内容时给出 \`https://www.bilibili.com/video/BVxxx?t=秒\` 形式的回跳链接；多 P 视频必须带 \`?p=页码\`，否则跳过去的是 P1 的那一秒。
 `;
 
@@ -185,6 +193,7 @@ export function apply(ctx, config) {
           transcript_path: { type: 'string', description: '本地文稿路径（JSON 或带 [mm:ss] 的文本），优先于在线字幕' },
           transcript_text: { type: 'string', description: '直接粘贴的文稿' },
           distill: { type: 'boolean', description: '是否调用模型提取卡片（默认按插件配置）' },
+          judge: { type: 'boolean', description: '学完是否把卡片交给模型质检（广告/口水话）。默认按配置 judgeAfterLearn=true；传 false 跳过，之后可用 bili_filter 补判' },
           max_minutes: { type: 'integer', description: '只学前 N 分钟（0=全部）' },
           force: { type: 'boolean', description: '已学过也重新抓取提取' },
         },
@@ -336,11 +345,38 @@ export function apply(ctx, config) {
             segments: segments.length,
             distilled: segments.filter((s) => s.status === 'distilled').length,
             unread: segments.filter((s) => s.status === 'unread').length,
+            noise: segments.filter((s) => s.status === 'noise').length,
             loggedIn: bili.loggedIn,
           },
           learnedAt: new Date().toISOString(),
         };
         kb.saveVideo({ meta: source, lines, segments, cards, warnings });
+        // saveVideo 不猜噪声；回读真实落盘结果，再把卡片成批交给模型质检。
+        let stored = kb.load(meta.bvid, pageIndex) ?? { cards: [], filtered: [], judgments: {}, pinned: [] };
+        let judged = null;
+        if (args.judge !== false && cfg.judgeAfterLearn !== false && stored.cards.length > 0) {
+          const jllm = ctx.get?.('llm');
+          const jmodel = resolveModel();
+          if (jllm && jmodel) {
+            const res = await judgeCards({
+              llm: jllm,
+              provider: jmodel.provider,
+              model: jmodel.model,
+              cards: stored.cards,
+              batchSize: Number(cfg.judgeBatch ?? 12),
+              maxTokens: Number(cfg.judgeMaxTokens ?? 1600),
+              cache: stored.judgments ?? {},
+              pinned: stored.pinned ?? [],
+              signal: exec.signal,
+            });
+            kb.saveJudgments(meta.bvid, res.verdicts, { page: pageIndex });
+            const pass = kb.applyJudgments(meta.bvid, { page: pageIndex, verdicts: res.verdicts });
+            judged = { model: `${jmodel.provider}/${jmodel.model}`, calls: res.calls, fromCache: res.fromCache, uncertain: pass.uncertain.length, removed: pass.removed, stats: pass.stats };
+            stored = kb.load(meta.bvid, pageIndex) ?? stored;
+          } else {
+            warnings.push('质检跳过：没有可用的判定模型。卡片没有删，之后可以 bili_filter 补判。');
+          }
+        }
 
         return {
           ok: true,
@@ -349,7 +385,22 @@ export function apply(ctx, config) {
           page: { index: page.index, part: page.part, duration: page.duration },
           transcript: { source: sourceKind, lines: lines.length, note: sourceNote },
           coverage: source.coverage,
-          cards: cards.length,
+          cards: stored.cards.length,
+          filtered: judged
+            ? {
+                judged: judged.stats?.total ?? 0,
+                removed: judged.removed.length,
+                keptAfterJudge: stored.cards.length,
+                by: judged.model,
+                modelCalls: judged.calls,
+                fromCache: judged.fromCache,
+                uncertain: judged.uncertain,
+                samples: judged.removed.slice(0, 8).map((c) => ({ id: c.id, verdict: c._verdict, reason: (c._reasons ?? []).join('、'), title: c.title })),
+                note: judged.removed.length > 0
+                  ? '模型判成广告/引流/口水话的卡片没有留在 cards.json；它们存在 filtered.json（带模型的判定与理由），判错了用 bili_filter action=restore 放回。'
+                  : '模型质检后没有发现广告/口水话卡片。',
+              }
+            : { judged: 0, removed: 0, note: '本次未质检（judge=false、没有可用模型，或没有卡片）。之后可 bili_filter action=scan 补判。' },
           ...(distillReport ? { distill: distillReport } : {}),
           warnings,
           paths: {
@@ -359,7 +410,7 @@ export function apply(ctx, config) {
             cards: `${pageKey(meta.bvid, pageIndex)}/cards.md`,
             study: `${pageKey(meta.bvid, pageIndex)}/study.md`,
           },
-          next: cards.length > 0
+          next: stored.cards.length > 0
             ? '复核 cards.md（对照 transcript.md 的时间锚点），必要时用 bili_note 修正；然后 bili_practice 自测。'
             : lines.length > 0
               ? '读 transcript.md 后用 bili_note 写卡片。'
@@ -663,6 +714,144 @@ export function apply(ctx, config) {
         const page = Number(args.page ?? 1) || 1;
         const total = kb.saveCards(args.bvid, args.cards, { page, source: 'agent', replace: Boolean(args.replace) });
         return { ok: true, bvid: args.bvid, page, cards: total, path: `${pageKey(args.bvid, page)}/cards.md` };
+      },
+    }),
+  );
+
+  disposers.push(
+    ctx.tools.register({
+      name: 'bili_filter',
+      description: '质检知识卡片：把卡片成批交给模型判定是不是广告/引流/口水话（插件不做正则猜测）。action=scan 送模型判并预览（不改卡片），action=apply 按判定剔除（进 filtered.json，可回滚），action=restore 放回并钉住，action=stats 汇总已剔的卡片。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', enum: ['scan', 'apply', 'restore', 'stats'], description: 'scan=预览；apply=执行；restore=放回；stats=汇总' },
+          bvid: { type: 'string', description: '限定视频（BV 号）；省略就作用于全库（scan/apply/stats）' },
+          page: { type: 'integer', description: '限定分 P（多 P 视频）；省略 = 该视频所有页' },
+          series: { type: 'string', description: '限定系列（如 season:1234567）' },
+          kinds: { type: 'array', items: { type: 'string', enum: ['ad', 'filler'] }, description: '要剔掉的模型判定，默认 ["ad","filler"]' },
+          batch_size: { type: 'integer', description: '每次送模型判的卡片数（默认 12；本地模型要小批量短输出）' },
+          max_tokens: { type: 'integer', description: '每次判定的 maxTokens（默认 1600）' },
+          card_ids: { type: 'array', items: { type: 'string' }, description: 'restore 要放回的卡片 id（可先 scan 看 id）' },
+          limit: { type: 'integer', description: 'scan/stats 最多列多少条（默认 30）' },
+        },
+        required: ['action'],
+      },
+      output: { schema: { type: 'object' }, render: (_args, value) => TOOL_TEXT(value) },
+      isConcurrencySafe: () => false,
+      async execute(args, exec) {
+        const action = args.action ?? 'scan';
+        const drop = Array.isArray(args.kinds) && args.kinds.length ? args.kinds : ['ad', 'filler'];
+        const targets = [];
+        if (args.bvid) targets.push(...kb.pagesOf(args.bvid).filter((v) => args.page === undefined || (v.page ?? 1) === Number(args.page)));
+        else if (args.series) {
+          for (const v of kb.seriesProgress(args.series)?.learned ?? []) targets.push(...kb.pagesOf(v.bvid));
+        } else targets.push(...kb.listVideos());
+        if (targets.length === 0) return { ok: false, note: `知识库里没有${args.bvid ? ` ${args.bvid}` : args.series ? ` 系列 ${args.series}` : '可筛的条目'}` };
+
+        if (action === 'restore') {
+          if (!args.bvid) throw new Error('restore 需要 bvid（卡片是按页存的）');
+          if (!Array.isArray(args.card_ids) || args.card_ids.length === 0) throw new Error('restore 需要 card_ids');
+          const results = targets.map((v) => ({ page: v.page ?? 1, ...kb.restoreCards(args.bvid, args.card_ids, { page: v.page ?? 1 }) }));
+          return { ok: true, bvid: args.bvid, results, note: '放回后 cards.md / study.md 已同步重写。' };
+        }
+
+        if (action === 'stats') {
+          const byVerdict = {};
+          const byReason = {};
+          let stored = 0;
+          let pages = 0;
+          const worst = [];
+          for (const entry of targets) {
+            if (exec.signal?.aborted) break;
+            const store = kb.load(entry.bvid, entry.page ?? 1);
+            const list = store.filtered ?? [];
+            if (!list.length) continue;
+            pages += 1;
+            stored += list.length;
+            for (const c of list) {
+              byVerdict[c._verdict ?? '噪声'] = (byVerdict[c._verdict ?? '噪声'] ?? 0) + 1;
+              for (const r of c._reasons ?? []) byReason[r] = (byReason[r] ?? 0) + 1;
+            }
+            worst.push({ bvid: entry.bvid, page: entry.page ?? 1, title: entry.title, dropped: list.length, sample: list[0]?.title ?? '' });
+          }
+          worst.sort((a, b) => b.dropped - a.dropped);
+          return {
+            ok: true,
+            scannedPages: targets.length,
+            pagesWithDrops: pages,
+            dropped: stored,
+            byVerdict,
+            byReason: Object.entries(byReason).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([reason, n]) => `${reason}×${n}`),
+            worst: worst.slice(0, Number(args.limit ?? 30)),
+            note: stored === 0 ? '全库没有模型判成广告/口水话的卡片——现有卡片是干净的。' : '这些是模型判成广告/引流/口水话后剔掉的卡片（存在各页 filtered.json，没真删）。想恢复：action=restore 带 bvid 与 card_ids。',
+          };
+        }
+
+        // scan / apply：把卡片成批交给模型判（插件不做正则猜测），scan 只报告，apply 才落账。
+        const llm = ctx.get?.('llm');
+        const model = resolveModel();
+        if (!llm || !model) throw new Error('没有可用的判定模型（llm 服务或默认模型缺失）——判定由模型做，插件不用正则硬猜');
+
+        const hits = [];
+        const unjudged = [];
+        let toDrop = 0;
+        let removed = 0;
+        let calls = 0;
+        let fromCache = 0;
+        const tally = {};
+        for (const entry of targets) {
+          if (exec.signal?.aborted) break;
+          const page = entry.page ?? 1;
+          const store = kb.load(entry.bvid, page);
+          if (!store?.meta || store.cards.length === 0) continue;
+          const judged = await judgeCards({
+            llm,
+            provider: model.provider,
+            model: model.model,
+            cards: store.cards,
+            batchSize: Number(args.batch_size ?? cfg.judgeBatch ?? 12),
+            maxTokens: Number(args.max_tokens ?? cfg.judgeMaxTokens ?? 1600),
+            cache: store.judgments ?? {},
+            pinned: store.pinned ?? [],
+            signal: exec.signal,
+          });
+          calls += judged.calls;
+          fromCache += judged.fromCache;
+          unjudged.push(...judged.unjudged);
+          kb.saveJudgments(entry.bvid, judged.verdicts, { page });
+          for (const [id, v] of Object.entries(judged.verdicts)) tally[v.verdict] = (tally[v.verdict] ?? 0) + 1;
+
+          const pass = applyVerdicts(store.cards, judged.verdicts, { drop, pinned: store.pinned ?? [] });
+          toDrop += pass.dropped.length;
+          for (const c of pass.dropped) {
+            if (hits.length < Number(args.limit ?? 30)) {
+              hits.push({ bvid: entry.bvid, page, id: c.id, verdict: c._verdict, reason: (c._reasons ?? []).join('、'), title: c.title, claim: clip(c.claim, 110), quote: clip((c.evidence ?? [])[0]?.quote ?? '', 110) });
+            }
+          }
+          if (action === 'apply' && pass.dropped.length) {
+            const r = kb.applyJudgments(entry.bvid, { page, verdicts: judged.verdicts, drop });
+            removed += r.removed.length;
+          }
+        }
+        return {
+          ok: true,
+          action,
+          judge: `${model.provider}/${model.model}`,
+          scannedPages: targets.length,
+          dropKinds: drop,
+          verdictTally: tally,
+          toRemove: toDrop,
+          removed,
+          modelCalls: calls,
+          fromCache,
+          unjudged: { count: unjudged.length, ids: unjudged.slice(0, 20) },
+          samples: hits,
+          note: action === 'apply'
+            ? `已按模型判定剔掉 ${removed} 张（卡片存进各页 filtered.json，模型的 verdict 与理由都留着，可 bili_filter restore 放回）。判不了的 ${unjudged.length} 张原样保留，没有删。`
+            : `这是预览，没有改动卡片。判定由模型给出，理由见 samples[].reason；确认无误再 action=apply。判不了的 ${unjudged.length} 张不会被删。`,
+        };
       },
     }),
   );

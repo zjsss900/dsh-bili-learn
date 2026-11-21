@@ -7,11 +7,30 @@ const entry = await import(new URL('../dsh-bili-learn/index.js', import.meta.url
 const tools = {};
 const sections = [];
 const skills = [];
+// 假判定模型：真的读卡片行、按内容回判定（门禁验的是送判/缓存/落账/回滚管线；
+// 判定质量靠真机跑真实知识库验收，见 .tools/judge-live.mjs）。
+const judgeLlm = {
+  calls: 0,
+  async *stream({ system, messages }) {
+    judgeLlm.calls += 1;
+    const user = (messages?.[0]?.content ?? []).map((c) => c.text ?? '').join('');
+    const ids = [...user.matchAll(/id=([A-Za-z0-9_-]+)/g)].map((m) => m[1]);
+    const out = ids.map((id) => {
+      const line = user.split(`id=${id}`)[1]?.split('\n')[0] ?? '';
+      return { id, verdict: /一键三连|三连/.test(line) ? 'ad' : 'knowledge', reason: /一键三连|三连/.test(line) ? '求三连' : '' };
+    });
+    yield { type: 'text-delta', index: 0, text: JSON.stringify(out) };
+    yield { type: 'finish', index: 0, reason: { kind: 'stop' } };
+  },
+};
+
 const ctx = {
   tools: { register: (definition) => { tools[definition.name] = definition; return () => delete tools[definition.name]; } },
   get: (name) => {
     if (name === 'skills') return { register: (skill) => { skills.push(skill); return () => {}; } };
     if (name === 'systemPrompt') return { section: (s) => { sections.push(s); return () => {}; }, getSectionOrder: () => 1 };
+    if (name === 'llm') return judgeLlm;
+    if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'stub', model: 'judge-stub' }) };
     return undefined;
   },
 };
@@ -21,7 +40,7 @@ const cleanup = entry.apply(ctx, { kbDir, cookie: '', distill: false, skillsDir:
 const failures = [];
 const check = (name, condition, detail = '') => { if (condition !== true) failures.push(`${name}: ${condition}${detail ? ` | ${detail}` : ''}`); };
 
-check('registered 10 tools', Object.keys(tools).length === 10, Object.keys(tools).join(','));
+check('registered 11 tools', Object.keys(tools).length === 11, Object.keys(tools).join(','));
 check('all tools have output.render', Object.values(tools).every((t) => typeof t.output?.render === 'function'));
 check('all tools have object output schema', Object.values(tools).every((t) => t.output?.schema?.type === 'object'));
 check('skill registered', skills.length === 1 && skills[0].name === 'bili-study');
@@ -31,6 +50,7 @@ check('bili_skill can take series instead of bvids', !tools.bili_skill?.paramete
 check('bili_recall has series filter', Boolean(tools.bili_recall?.parameters?.properties?.series));
 check('bili_learn can batch pages', Boolean(tools.bili_learn?.parameters?.properties?.pages && tools.bili_learn?.parameters?.properties?.all_pages));
 check('bili_note / bili_practice take page', Boolean(tools.bili_note?.parameters?.properties?.page && tools.bili_practice?.parameters?.properties?.page && tools.bili_practice?.parameters?.properties?.results?.items?.properties?.page));
+check('bili_filter has 4 actions and kinds', JSON.stringify(tools.bili_filter?.parameters?.properties?.action?.enum) === '["scan","apply","restore","stats"]' && Boolean(tools.bili_filter?.parameters?.properties?.kinds), JSON.stringify(tools.bili_filter?.parameters?.properties?.action?.enum));
 
 const lossless = (value) => {
   const walk = (v, p) => {
@@ -107,6 +127,22 @@ try {
 }
 check('bili_skill refuses overwrite without force', skillClash.includes('已存在'), skillClash);
 
+// 卡片质检：判定由模型给。这里用假判定模型验管线（送判→缓存→落账→回滚→钉住）。
+const adNote = await run('bili_note', { bvid: 'BV1tRxt68EZa', cards: [{ id: 'ad1', title: '求支持', claim: '觉得有用请一键三连', evidence: [{ t: 3, quote: '觉得有用一键三连' }, { t: 9, quote: '感谢观看，我们下期见' }] }] });
+check('bili_note stores cards as-is (judging is a separate model pass)', adNote?.cards === 2, JSON.stringify({ cards: adNote?.cards }));
+const fScan = await run('bili_filter', { action: 'scan', bvid: 'BV1tRxt68EZa' });
+check('bili_filter scan asks the model and previews without touching cards', fScan?.toRemove === 1 && fScan?.samples?.[0]?.reason === '求三连' && (fScan?.modelCalls ?? 0) >= 1, JSON.stringify({ toRemove: fScan?.toRemove, s: fScan?.samples?.[0], calls: fScan?.modelCalls }));
+const fScan2 = await run('bili_filter', { action: 'scan', bvid: 'BV1tRxt68EZa' });
+check('bili_filter reuses cached verdicts (no extra model calls)', (fScan2?.modelCalls ?? 99) === 0 && (fScan2?.fromCache ?? 0) >= 2, JSON.stringify({ calls: fScan2?.modelCalls, fromCache: fScan2?.fromCache }));
+const fApply = await run('bili_filter', { action: 'apply', bvid: 'BV1tRxt68EZa' });
+check('bili_filter apply drops only what the model called ad', fApply?.removed === 1, JSON.stringify({ removed: fApply?.removed }));
+const fStats = await run('bili_filter', { action: 'stats' });
+check('bili_filter stats counts the model-dropped card', (fStats?.dropped ?? 0) === 1 && Object.keys(fStats?.byVerdict ?? {}).includes('ad'), JSON.stringify(fStats?.byVerdict));
+const fRestore = await run('bili_filter', { action: 'restore', bvid: 'BV1tRxt68EZa', card_ids: ['ad1'] });
+check('bili_filter restore puts the card back', fRestore?.results?.[0]?.restored === 1, JSON.stringify(fRestore?.results));
+const fScan3 = await run('bili_filter', { action: 'scan', bvid: 'BV1tRxt68EZa' });
+check('restored card is pinned, not offered again', fScan3?.toRemove === 0, JSON.stringify({ toRemove: fScan3?.toRemove }));
+
 const due = await run('bili_practice', { action: 'due' });check('practice due lists k1', due?.due?.some((c) => c.card_id === 'k1'));
 const graded = await run('bili_practice', { action: 'grade', bvid: 'BV1tRxt68EZa', results: [{ card_id: 'k1', verdict: 'ok' }] });
 check('practice grade mastery 1', graded?.applied?.[0]?.mastery === 1, JSON.stringify(graded?.applied));
@@ -114,7 +150,7 @@ const afterGrade = await run('bili_practice', { action: 'due' });
 check('k1 no longer due', !afterGrade?.due?.some((c) => c.card_id === 'k1'));
 
 const status2 = await run('bili_status', {});
-check('status counts card and 2 videos', status2?.cards === 1 && status2?.videos === 2, JSON.stringify({ c: status2?.cards, v: status2?.videos }));
+check('status counts 2 cards (ad restored) and 2 videos', status2?.cards === 2 && status2?.videos === 2, JSON.stringify({ c: status2?.cards, v: status2?.videos }));
 
 const sectionText = sections[0].text({});
 check('prompt section mentions kb', sectionText.includes('bili_recall') && sectionText.includes('BV1tRxt68EZa'), sectionText.slice(0, 120));

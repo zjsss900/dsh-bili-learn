@@ -20,7 +20,7 @@ The difference in one line: a summary loses the evidence; here every claim carri
 | Knowledge stays scattered and un-reusable | `bili_skill` compiles several videos' cards into a `SKILL.md`, every rule linked back to its source |
 | Locked to one vendor's model | The card-extraction model is configurable (defaults to the current session model; can point at a fully local model) |
 
-## The 10 tools
+## The 11 tools
 
 | Tool | Purpose |
 |---|---|
@@ -30,6 +30,7 @@ The difference in one line: a summary loses the evidence; here every claim carri
 | `bili_recall` | Search what you already learned; returns cards and transcript evidence with timestamps and jump-back links |
 | `bili_practice` | Review loop: `due` lists cards due, `grade` records ok/miss and updates mastery plus the next review time |
 | `bili_note` | Write your own cards to override automatic extraction (`evidence` timestamps required) |
+| `bili_filter` | Card quality control: send cards to the model to be judged `knowledge` / `ad` / `filler`; `scan` / `apply` / `restore` / `stats` |
 | `bili_status` | Knowledge-base overview: videos learned, card counts, reviews due, warnings |
 | `bili_login` | QR login: render QR → poll → write the session cookie into `cookieFile` |
 | `bili_frame` | Extract frames at specific seconds to local images, for reading on-screen text with a vision model |
@@ -81,6 +82,19 @@ Consequences worth knowing:
 
 Measured on a 35-part course: learn P1 (15 cards), then `pages:[2,3]` → P1's 15 cards and 929 transcript lines survive untouched; re-learning P1 returns `skipped` and changes nothing.
 
+## Card quality control: the model judges, not regex
+
+Bilibili tutorials carry "smash the like button" begging, group-join lead magnets, course upsells, outro thanks, and filler such as "this feature is amazing". The plugin does **not** pattern-match those away — the judgment is the model's. The code only does three things: batch the cards, book the result, make it reversible.
+
+- After learning, that page's cards go to the model in batches of 12: `knowledge` / `ad` / `filler`, each with a reason of at most a dozen characters.
+- Cards judged `ad`/`filler` move out of `cards.json` into `filtered.json` — verdict and reason included, **nothing is silently deleted** — and `cards.md` grows an appendix listing what was dropped and why.
+- Anything the model cannot judge (empty output, missing id) stays in `cards.json` and is recorded as `uncertain`. No verdict, no deletion.
+- The judge prompt carries an explicit bias: "when unsure, answer `knowledge` — keep it, never drop knowledge by mistake."
+- `bili_filter`: `scan` previews (verdicts are cached in `judgments.json`, keyed by a card digest, so a re-run costs zero calls) → `apply` books it → `restore` returns a card and **pins** it (`pinned.json`; later re-learns and re-judges never touch a pinned card) → `stats` summarizes the whole base.
+- Extraction is also told not to emit such cards in the first place; when a whole segment is only ads and filler the model returns `[]` and the segment is marked `noise` — different from `unread`, which means "we never got the transcript".
+
+Verified against the real knowledge base with the local model: one video, 4 cards, 1 call, 9 seconds — it dropped the "comment a keyword to get my script template" card (reason: lead magnet in the comments) and kept the other three. Reproduce with `node tests/judge-live.mjs <bvids>` (single process, serial, writes only the verdict cache, never touches cards).
+
 ## Install
 
 1. Put `dsh-bili-learn/` into your DSH plugin directory (or install it through the plugin manager). The plugin registers itself via `cordis.patch.yml`; startup-scoped profiles need a restart.
@@ -95,6 +109,7 @@ Measured on a 35-part course: learn P1 (15 cards), then `pages:[2,3]` → P1's 1
 | `distill` / `distillProvider` / `distillModel` | `true` / empty / empty | Which model extracts cards; empty = the current session model (a local one works) |
 | `segmentMinutes` / `maxCardsPerSegment` | `8` / `5` | Segment length and per-segment card cap |
 | `distillMaxTokens` | `2500` | Short output plus one retry (reasoning models blow up on long outputs) |
+| `judgeAfterLearn` / `judgeBatch` / `judgeMaxTokens` | `true` / `12` / `1600` | Card quality control: batch cards to the model for an `ad`/`filler` verdict. The verdict is the model's; the plugin writes no ad regexes |
 | `maxLearnMinutes` | `0` | `0` = whole video; `>0` = only the first N minutes |
 | `injectIndex` | `true` | Inject a compact index of "what has been learned" into the system prompt |
 | `qrPython` / `qrPng` | `python` / empty | QR rendered locally — **the login token never goes to any third party** |
@@ -138,8 +153,9 @@ examples/bili-kb/BV1tRxt68EZa/
 ## Tests
 
 ```bash
-node tests/selftest.mjs   # PASS 47 checks   pure functions and knowledge-base gates (series progress + per-page isolation)
-node tests/tool-test.mjs  # PASS 10 tools    drives the real tools with a fake ctx, checks lossless output
+node tests/selftest.mjs   # PASS 65 checks   pure functions and knowledge-base gates (series progress, per-page isolation, judgment bookkeeping + rollback)
+node tests/tool-test.mjs  # PASS 11 tools    drives the real tools with a fake ctx, checks lossless output
+node tests/judge-live.mjs # optional: real model + your own knowledge base, verdict cache only, never touches cards
 ```
 
 CI runs the first gate on every push; the second one touches the live Bilibili API, so it is allowed to fail on datacenter IPs (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Release notes live in [CHANGELOG.md](CHANGELOG.md).

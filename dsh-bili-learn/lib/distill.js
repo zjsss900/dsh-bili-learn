@@ -11,6 +11,8 @@ const SYSTEM = [
   '{"title":"简短标题","kind":"concept|procedure|fact|caution|example","claim":"一句话结论","why":"为什么成立/为什么重要","how":["可执行步骤"],"evidence":[{"t":秒数,"quote":"讲稿原文片段"}],"tags":["关键词"],"confidence":"high|medium|low"}',
   '规则：只提取视频里真实讲到的内容；evidence.t 必须来自输入的时间戳；讲稿没讲清楚的就不要编造，confidence 写 low。',
   'claim 不超过 40 字，how 每条不超过 30 字。',
+  '不要出这些卡片：广告/赞助/恰饭、求关注点赞投币三连、加群扫码领资料、卖课报名优惠、抽奖、片头自我介绍、片尾致谢、「今天我们来学…」「接下来看」这类过渡话、以及「很强大/非常好用/效果震撼」这种没有具体信息的空话。',
+  '整段只有上面这类内容时，直接输出 []（空数组），不要勉强凑卡片。',
 ].join('\n');
 
 /** 从模型输出里抠出 JSON 数组。 */
@@ -59,14 +61,14 @@ function normalizeCards(raw, { limit, segment }) {
   return out;
 }
 
-async function callModel({ llm, provider, model, userText, maxTokens, signal }) {
+export async function callModel({ llm, provider, model, userText, maxTokens, system = SYSTEM, signal }) {
   let text = '';
   let reasoningChars = 0;
   let finish;
   for await (const chunk of llm.stream({
     provider,
     model,
-    system: SYSTEM,
+    system,
     messages: [{ role: 'user', content: [{ type: 'text', text: userText }] }],
     maxTokens,
     signal,
@@ -92,10 +94,11 @@ export async function distillSegments({ llm, provider, model, meta, segments, ma
     let contentAttempts = 0;
     let transportRetries = 0;
     let produced = [];
+    let explicitEmpty = false;
     let note = '';
     let reasoningChars = 0;
     // 内容失败与传输失败分开计数：网络抖动不该浪费一次「收紧提示」的重试机会。
-    while (produced.length === 0 && contentAttempts < 2 && transportRetries < 3) {
+    while (produced.length === 0 && !explicitEmpty && contentAttempts < 2 && transportRetries < 3) {
       const tight = contentAttempts > 0;
       try {
         const outcome = await callModel({
@@ -111,7 +114,11 @@ export async function distillSegments({ llm, provider, model, meta, segments, ma
         contentAttempts += 1;
         reasoningChars = outcome.reasoningChars;
         const parsed = extractJsonArray(outcome.text);
-        if (parsed) produced = normalizeCards(parsed, { limit: tight ? 3 : maxCardsPerSegment, segment });
+        if (Array.isArray(parsed) && parsed.length === 0) {
+          // 空数组是模型明确说这段没有知识点（只有广告/口水/纯展示），不是失败，别重试。
+          explicitEmpty = true;
+          note = '模型判定本段无知识点（广告/口水/纯展示）';
+        } else if (parsed) produced = normalizeCards(parsed, { limit: tight ? 3 : maxCardsPerSegment, segment });
         else if (!outcome.text.trim()) note = `正文为空（思考占 ${reasoningChars} 字${outcome.truncated ? '，且被 maxTokens 截断' : ''}）`;
         else note = outcome.truncated ? `输出被 maxTokens 截断，未能解析（正文 ${outcome.text.length} 字）` : '输出不是可解析的 JSON 数组';
       } catch (error) {
@@ -122,7 +129,7 @@ export async function distillSegments({ llm, provider, model, meta, segments, ma
       }
     }
     if (produced.length === 0) {
-      segment.status = 'unread';
+      segment.status = explicitEmpty ? 'noise' : 'unread';
       segment.note = note || '模型没有产出卡片';
     } else {
       segment.status = 'distilled';
