@@ -40,7 +40,7 @@ const cleanup = entry.apply(ctx, { kbDir, cookie: '', distill: false, skillsDir:
 const failures = [];
 const check = (name, condition, detail = '') => { if (condition !== true) failures.push(`${name}: ${condition}${detail ? ` | ${detail}` : ''}`); };
 
-check('registered 11 tools', Object.keys(tools).length === 11, Object.keys(tools).join(','));
+check('registered 12 tools', Object.keys(tools).length === 12, Object.keys(tools).join(','));
 check('all tools have output.render', Object.values(tools).every((t) => typeof t.output?.render === 'function'));
 check('all tools have object output schema', Object.values(tools).every((t) => t.output?.schema?.type === 'object'));
 check('skill registered', skills.length === 1 && skills[0].name === 'bili-study');
@@ -156,6 +156,19 @@ const sectionText = sections[0].text({});
 check('prompt section mentions kb', sectionText.includes('bili_recall') && sectionText.includes('BV1tRxt68EZa'), sectionText.slice(0, 120));
 check('prompt section mentions series learning', sectionText.includes('bili_series'), sectionText.slice(-160));
 check('skill body mentions bili_series', String(skills[0]?.content ?? '').includes('bili_series'), String(skills[0]?.content ?? '').slice(0, 80));
+
+// SQLite 索引层：建、体检、双跑比对（SQL 不能比 JSON 少查到东西）
+check('bili_index takes action and queries', Boolean(tools.bili_index?.parameters?.properties?.action && tools.bili_index?.parameters?.properties?.queries));
+const ixBuild = await run('bili_index', { action: 'rebuild' });
+check('bili_index rebuild indexes every page', ixBuild?.ok === true && ixBuild?.pages >= 2 && (ixBuild?.skipped ?? []).length === 0, JSON.stringify({ ok: ixBuild?.ok, pages: ixBuild?.pages, cards: ixBuild?.cards, skipped: ixBuild?.skipped }));
+const ixStatus = await run('bili_index', { action: 'status' });
+check('bili_index status: index matches json', ixStatus?.consistent === true, JSON.stringify({ json: ixStatus?.json, sql: ixStatus?.sql, dangling: ixStatus?.dangling }));
+const ixVerify = await run('bili_index', { action: 'verify', queries: ['秩', '主元', '一键三连'] });
+check('bili_index verify: sql misses nothing json found', ixVerify?.ok === true && ixVerify?.missingInSql === 0 && ixVerify?.queries === 3, JSON.stringify({ ok: ixVerify?.ok, missing: ixVerify?.missingInSql, n: ixVerify?.queries, per: ixVerify?.perQuery }));
+check('bili_index verify: recall actually runs on sql engine', ixVerify?.engineNow === 'sql', String(ixVerify?.engineNow));
+const sqlRecall = await run('bili_recall', { query: '秩 主元', engine: 'sql' });
+check('bili_recall engine=sql returns cards with backlinks', (sqlRecall?.cards ?? []).length >= 1 && sqlRecall.cards[0].evidence?.[0]?.t !== undefined, JSON.stringify(sqlRecall?.cards?.[0] ?? null));
+check('bili_recall engine=json still answers (fallback path)', (await run('bili_recall', { query: '秩 主元', engine: 'json' }))?.cards?.length >= 1);
 
 // 错误路径要给出可读错误，而不是崩栈
 for (const [name, args, expect] of [['bili_note', { bvid: 'BVDEMO000007', cards: [] }, '知识库里没有'], ['bili_practice', { action: 'grade', results: [] }, '需要 bvid'], ['bili_frame', { url: 'BVDEMO000007', times: [1] }, '-400']]) {

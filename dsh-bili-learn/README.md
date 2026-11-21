@@ -38,6 +38,7 @@ plugin_manager: action=install_bundle, target=<本地路径>/dsh-bili-learn
 | `judgeAfterLearn` | `true` | 学完把卡片成批送模型质检（广告/引流/口水话）。判定由模型给，插件不写正则猜 |
 | `judgeBatch` | 12 | 每次送判的卡片数（本地模型要小批量、短输出） |
 | `judgeMaxTokens` | 1600 | 每次质检的 maxTokens；判定输出很短，够 |
+| `sqliteIndex` | `true` | 用 SQLite 做检索索引层（`bili_recall`/待复习统计毫秒级）。设 `false` 就完全走 JSON 全扫 |
 | `maxLearnMinutes` | 0 | 0 = 整段都学 |
 | `injectIndex` | `true` | 把「已学会 N 个视频」的紧凑索引注入系统提示 |
 
@@ -75,6 +76,7 @@ ffmpeg 从哪来：config 的 `ffmpeg` → PATH 上的 `ffmpeg` → `pip install
 | `bili_learn` | 抓讲稿 → 分段 → 提取卡片 → 落盘 |
 | `bili_series` | 同一 UP 主的系列教程：`find`/`list`/`next`/`learn`/`cluster` |
 | `bili_recall` | 检索已学会的卡片与讲稿证据（带时间戳、回跳链接） |
+| `bili_index` | SQLite 查询索引层：`status` 体检 / `rebuild` 重建 / `verify` 两条路双跑比对 |
 | `bili_note` | 由模型/用户手写卡片，覆盖同 id |
 | `bili_filter` | 卡片质检：送模型判「知识 / 广告引流 / 口水话」，`scan`/`apply`/`restore`/`stats` |
 | `bili_practice` | `due` 取待复习卡片；`grade` 记录 ok/miss，驱动间隔复习 |
@@ -136,6 +138,7 @@ ffmpeg 从哪来：config 的 `ffmpeg` → PATH 上的 `ffmpeg` → `pip install
 ```
 $DSH_HOME/bili-kb/
   index.json                 # 视频索引 + 系列清单（series[key].episodes）
+  bili.sqlite                # 查询索引（由 JSON 派生，可删可重建；删了自动回退 JSON 路线）
   BVxxxxxxxx/
     source.json              # 元数据 + 覆盖度 + 字幕来源
     transcript.json / .md    # 带时间锚点的讲稿
@@ -149,6 +152,28 @@ $DSH_HOME/bili-kb/
   BVxxxxxxxx_p2/             # 多 P 的第 2 页起各存一份（P1 仍是 BVxxxxxxxx/）
   BVxxxxxxxx/frames/         # bili_frame 抽出来的画面
 ```
+
+## 查询索引：SQLite 只做候选召回，排序口径只有一套
+
+规模上去以后，「每次检索都扫全部 JSON」是线性变糟的那条路。实测本机：
+
+| | 现在（342 页 / 1546 卡 / 48033 讲稿行） | 100× 外推（34200 页 / 154600 卡） |
+| --- | --- | --- |
+| 全库 JSON | 11.3 MB、2833 个文件 | ≈1.13 GB、≈28.3 万个文件 |
+| `bili_recall` | 195 ms/查询 | ≈29 s/查询 |
+| 走索引 | **1 ms/查询** | 同量级（毫秒） |
+| 全库统计 / 待复习 | 234 ms / 234 ms | ≈23 s / ≈23 s |
+| `index.json` 重写 | 378 KB | ≈37 MB |
+
+设计原则（刻意的，别改）：
+
+- **JSON 是真相源**。`bili.sqlite` 只是派生缓存：`bili_index action=rebuild` 2.4 秒重建完；删掉它就自动回退 JSON 路线，**不丢任何知识**。
+- **索引只负责「含任一词元」的候选召回**——那正是打分 >0 的必要条件，所以候选集是 JSON 全扫结果的超集。最终排序仍走 `text.js` 的 `scoreCard` / `searchLines`，**口径只有一套**。谁想「让 bm25 直接决定 top8」就是在制造两条不同的检索结果，实测那样做 60 个查询里有 250 条命中对不上。
+- 中文用 **bigram 灌 `fts5(tokenize='unicode61')`**：`trigram` 对「景别」「轴线」这类两字词**完全不命中**（实测 0 条），别用。
+- 绑定收口：`node:sqlite` 不接受对象参数——实测 `series` 字段是对象时整页卡片静默漏索引（已修 + 门禁盯着）。
+- 每次写卡片都会顺手镜像这一页；镜像失败只记一笔，绝不回滚知识落盘。
+
+验收（真库、非合成）：`node tests/db-real-verify.mjs` → 60 个查询（含中英混合、专有名词）**卡片 top8 逐条一致、顺序一致、漏 0 条**；讲稿行 5 组一致；待复习列表跨页一致；整体 17.8× 提速（单查询 ~200×）。`bili_index action=verify` 把同一件事做成随时可跑的工具调用，`engine=json`/`engine=sql` 可强制对比。
 
 ## 卡片质检：判定交给模型，不写正则
 
@@ -196,8 +221,10 @@ B 站教程里混着求三连、加群领资料、卖课、片尾致谢，以及
 ## 自检
 
 ```bash
-node tests/selftest.mjs     # 65 项：分段/文稿/知识库/复习/字幕/提取器两条路径/质检记账与回滚
-node tests/tool-test.mjs    # 用假 ctx 跑全部 11 个工具，校验输出是 lossless JSON
-node tests/judge-live.mjs   # 真模型 + 真知识库验收判定（只写缓存，不动卡片）
+node tests/selftest.mjs       # 82 项：分段/文稿/知识库/复习/字幕/提取器两条路径/质检记账与回滚/索引层与两条路一致
+node tests/tool-test.mjs      # 用假 ctx 跑全部 12 个工具，校验输出是 lossless JSON
+node tests/db-smoke.mjs       # 索引层冒烟：建/镜像/增量/重建/删掉后回退 JSON
+node tests/db-real-verify.mjs # 真知识库双跑验收：60 查询卡片逐条一致 + 讲稿行 + 待复习 + 计时（要传 BILI_KB）
+node tests/judge-live.mjs     # 真模型 + 真知识库验收判定（只写缓存，不动卡片）
 ```
 

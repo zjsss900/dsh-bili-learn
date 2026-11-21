@@ -20,7 +20,7 @@
 | 知识散落，无法复用 | `bili_skill` 把若干视频的知识拼成 `SKILL.md` 技能，每条规则挂回跳链接 |
 | 只有某个模型能用 | 提取卡片用哪个模型是可配的（默认当前会话模型，可指向本地模型），不绑定任何厂商 |
 
-## 11 个工具
+## 12 个工具
 
 | 工具 | 作用 |
 |---|---|
@@ -28,6 +28,7 @@
 | `bili_learn` | 抓元数据与字幕 → 分段 → 提取知识卡片；`pages` / `all_pages` 批量学多 P |
 | `bili_series` | 同一 UP 主的同一系列教程：`find` / `list` / `next` / `learn` / `cluster` |
 | `bili_recall` | 在已学知识里检索卡片与讲稿证据（返回时间戳与回跳链接） |
+| `bili_index` | 检索索引层（SQLite）：`status` 体检 / `rebuild` 重建 / `verify` 两条路双跑比对 |
 | `bili_practice` | 复习闭环：`due` 列出待复习卡片，`grade` 记录 ok/miss 并更新熟练度与下次复习时间 |
 | `bili_note` | 由你自己写卡片覆盖自动提取结果（必须带 `evidence` 时间戳） |
 | `bili_filter` | 卡片质检：把卡片交给模型判 `knowledge`/`ad`/`filler`，`scan`/`apply`/`restore`/`stats` |
@@ -95,6 +96,17 @@ B 站教程里混着求三连、加群领资料、卖课优惠、片尾致谢，
 
 真机验收（本机 qwen、真实知识库）：20 页共 168 张卡，22 次调用约 8 分钟，模型挑出 7 张——1 张教程运营计划 + 6 张口水话（如「本段结束景别内容，其他内容以后讲」「掌握这两点即可上手画分镜」），其余 161 张知识卡**零误杀**。另一个样本 4 张卡 1 次调用 9 秒，判掉「评论区扣关键词领模板」那张（理由：评论区领资料引流）。复跑：`node tests/judge-live.mjs <BV号,...>`（单进程串行，只写判定缓存，绝不动卡片）。
 
+## 规模上去以后：SQLite 只做候选召回
+
+库里到几千张卡之后，「每次检索把 JSON 全扫一遍」会线性变慢。实测（真实库 342 页 / 1546 卡 / 48033 讲稿行，全库 JSON 11.3 MB）：单查询 **195 ms → 1 ms**；100× 规模（34200 页 / 154600 卡）外推 **29 秒/查询**，而索引路线仍是毫秒。
+
+- `bili.sqlite` 是**派生缓存**，不是真相源：`bili_index action=rebuild` 2.4 秒重建完；删掉它就自动回退 JSON 路线，不丢任何知识。
+- **排序口径只有一套**：SQLite 只负责「卡片里出现了任一个查询词元」的候选召回——那正是打分 >0 的必要条件，所以候选集是 JSON 结果的超集；最终排序仍由同一套 `scoreCard` / 比较器决定。把 bm25 直接当最终排序是错的：实测 60 个查询里有 250 条命中与 JSON 路线对不上。
+- 中文必须用 **bigram 灌 `fts5(tokenize='unicode61')`**：`trigram` 对「景别」「轴线」这类两字词完全不命中（实测 0 条）。
+- 依赖为零：Node ≥ 22.5 自带 `node:sqlite`（FTS5 可用）；不可用时自动退回 JSON 路线，`sqliteIndex: false` 可整体关掉。
+
+验收（真实库，不是合成数据）：`node tests/db-verify.mjs` → 60 个查询（含中英混排、专有名词）卡片 top8 **逐条一致、顺序一致、漏 0 条**；讲稿行 5 组一致；跨页待复习列表一致；整体 17.8× 提速。`bili_index action=verify` 把同样的双跑做成随手可跑的工具调用。
+
 ## 安装
 
 1. 把 `dsh-bili-learn/` 放进 DSH 的插件目录（或通过插件管理安装）。插件通过 `cordis.patch.yml` 注册，启动期配置需要重启生效。
@@ -110,6 +122,7 @@ B 站教程里混着求三连、加群领资料、卖课优惠、片尾致谢，
 | `segmentMinutes` / `maxCardsPerSegment` | `8` / `5` | 分段长度与每段卡片上限 |
 | `distillMaxTokens` | `2500` | 短输出 + 失败重试一次（思考型模型长输出会翻车） |
 | `judgeAfterLearn` / `judgeBatch` / `judgeMaxTokens` | `true` / `12` / `1600` | 卡片质检：成批送模型判 `ad`/`filler`。判定由模型给，插件里没有任何广告正则 |
+| `sqliteIndex` | `true` | 检索索引层（SQLite）。设 `false` 就完全走 JSON 全扫；索引只是缓存，随时可删 |
 | `maxLearnMinutes` | `0` | `0` = 整段都学；`>0` 只学前 N 分钟 |
 | `injectIndex` | `true` | 把「已学会什么」的紧凑索引注入系统提示 |
 | `qrPython` / `qrPng` | `python` / 空 | 二维码本地渲染（**不把登录令牌交给任何第三方**） |
@@ -153,8 +166,10 @@ examples/bili-kb/BV1tRxt68EZa/
 ## 测试
 
 ```bash
-node tests/selftest.mjs   # PASS 65 checks   纯函数与知识库门禁（系列进度、多 P 互不覆盖、质检记账与回滚）
-node tests/tool-test.mjs  # PASS 11 tools    用假 ctx 驱动 11 个真实工具，验证输出无损
+node tests/selftest.mjs   # PASS 82 checks   纯函数与知识库门禁（系列进度、多 P 互不覆盖、质检记账与回滚、索引层两条路一致）
+node tests/tool-test.mjs  # PASS 12 tools    用假 ctx 驱动 12 个真实工具，验证输出无损
+node tests/db-smoke.mjs   # 索引层冒烟：建/镜像/增量/重建/删掉后自动回退 JSON
+node tests/db-verify.mjs  # 可选：拿你自己的知识库做双跑验收（卡片逐条一致 + 讲稿行 + 待复习 + 计时）
 node tests/judge-live.mjs # 可选：真模型 + 你自己的知识库，验收判定质量（只写缓存，不动卡片）
 ```
 

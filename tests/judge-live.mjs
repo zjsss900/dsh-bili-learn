@@ -29,7 +29,7 @@ const llm = {
   },
 };
 
-const kb = new KnowledgeBase(process.env.BILI_KB ?? process.argv[3] ?? '<你的 bili-kb 目录>');
+const kb = new KnowledgeBase(process.env.BILI_KB ?? '<你的 bili-kb 目录>');
 const targets = (process.argv[2] ?? 'BVDEMO000012,BVDEMO000013,BVDEMO000014,BVDEMO000015,BVDEMO000016').split(',');
 
 const grand = { pages: 0, cards: 0, calls: 0, fromCache: 0, ad: 0, filler: 0, uncertain: 0, unjudged: 0 };

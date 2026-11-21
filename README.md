@@ -20,7 +20,7 @@ The difference in one line: a summary loses the evidence; here every claim carri
 | Knowledge stays scattered and un-reusable | `bili_skill` compiles several videos' cards into a `SKILL.md`, every rule linked back to its source |
 | Locked to one vendor's model | The card-extraction model is configurable (defaults to the current session model; can point at a fully local model) |
 
-## The 11 tools
+## The 12 tools
 
 | Tool | Purpose |
 |---|---|
@@ -28,6 +28,7 @@ The difference in one line: a summary loses the evidence; here every claim carri
 | `bili_learn` | Fetch metadata + subtitles → segment → extract knowledge cards into the local knowledge base; `pages` / `all_pages` batch multi-part videos |
 | `bili_series` | Same uploader, same tutorial series: `find` / `list` / `next` / `learn` / `cluster` |
 | `bili_recall` | Search what you already learned; returns cards and transcript evidence with timestamps and jump-back links |
+| `bili_index` | Retrieval index layer (SQLite): `status` health check / `rebuild` / `verify` dual-run comparison of both code paths |
 | `bili_practice` | Review loop: `due` lists cards due, `grade` records ok/miss and updates mastery plus the next review time |
 | `bili_note` | Write your own cards to override automatic extraction (`evidence` timestamps required) |
 | `bili_filter` | Card quality control: send cards to the model to be judged `knowledge` / `ad` / `filler`; `scan` / `apply` / `restore` / `stats` |
@@ -95,6 +96,17 @@ Bilibili tutorials carry "smash the like button" begging, group-join lead magnet
 
 Verified against the real knowledge base with the local model: one video, 4 cards, 1 call, 9 seconds — it dropped the "comment a keyword to get my script template" card (reason: lead magnet in the comments) and kept the other three. Reproduce with `node tests/judge-live.mjs <bvids>` (single process, serial, writes only the verdict cache, never touches cards).
 
+## At scale: SQLite narrows candidates, it does not rank
+
+Once the base grows to a few thousand cards, "scan every JSON file on each recall" degrades linearly. Measured on the real base (342 pages / 1546 cards / 48033 transcript lines, 11.3 MB of JSON): **195 ms → 1 ms** per query; at 100× (34200 pages / 154600 cards) the JSON path extrapolates to **29 seconds per query**, while the indexed path stays in milliseconds.
+
+- `bili.sqlite` is a **derived cache**, never the source of truth: `bili_index action=rebuild` rebuilds it in 2.4 s; delete it and every query silently falls back to the JSON path. No knowledge is ever lost.
+- **One ranking semantic only**: SQLite only does candidate retrieval — "the card contains at least one query token" is precisely the necessary condition for a score above zero, so the candidate set is a superset of what a full scan would find. Final ranking still comes from the same `scoreCard` and comparator. Letting bm25 decide the top 8 is wrong: measured, 250 of 60 queries' hits disagreed with the JSON path.
+- Chinese needs **bigrams inside `fts5(tokenize='unicode61')`**: the `trigram` tokenizer returns zero hits for two-character terms such as 景别 or 轴线.
+- Zero dependencies: `node:sqlite` ships with Node ≥ 22.5 (FTS5 included); when unavailable everything falls back to JSON, and `sqliteIndex: false` turns the layer off entirely.
+
+Acceptance (real base, not synthetic): `node tests/db-verify.mjs` → 60 queries (mixed Chinese/English, proper nouns) return **identical top-8 cards, identical order, zero lost hits**; transcript-line groups identical on 5 queries; cross-page due lists identical; 17.8× faster overall. `bili_index action=verify` makes the same dual run a tool call you can fire any time.
+
 ## Install
 
 1. Put `dsh-bili-learn/` into your DSH plugin directory (or install it through the plugin manager). The plugin registers itself via `cordis.patch.yml`; startup-scoped profiles need a restart.
@@ -110,6 +122,7 @@ Verified against the real knowledge base with the local model: one video, 4 card
 | `segmentMinutes` / `maxCardsPerSegment` | `8` / `5` | Segment length and per-segment card cap |
 | `distillMaxTokens` | `2500` | Short output plus one retry (reasoning models blow up on long outputs) |
 | `judgeAfterLearn` / `judgeBatch` / `judgeMaxTokens` | `true` / `12` / `1600` | Card quality control: batch cards to the model for an `ad`/`filler` verdict. The verdict is the model's; the plugin writes no ad regexes |
+| `sqliteIndex` | `true` | Retrieval index layer (SQLite). `false` = always scan JSON; the index is only a cache, always disposable |
 | `maxLearnMinutes` | `0` | `0` = whole video; `>0` = only the first N minutes |
 | `injectIndex` | `true` | Inject a compact index of "what has been learned" into the system prompt |
 | `qrPython` / `qrPng` | `python` / empty | QR rendered locally — **the login token never goes to any third party** |
@@ -153,8 +166,10 @@ examples/bili-kb/BV1tRxt68EZa/
 ## Tests
 
 ```bash
-node tests/selftest.mjs   # PASS 65 checks   pure functions and knowledge-base gates (series progress, per-page isolation, judgment bookkeeping + rollback)
-node tests/tool-test.mjs  # PASS 11 tools    drives the real tools with a fake ctx, checks lossless output
+node tests/selftest.mjs   # PASS 82 checks   pure functions and knowledge-base gates (series progress, per-page isolation, judgment bookkeeping + rollback, index layer parity)
+node tests/tool-test.mjs  # PASS 12 tools    drives the real tools with a fake ctx, checks lossless output
+node tests/db-smoke.mjs   # index layer smoke: build / mirror / incremental / rebuild / fallback after deletion
+node tests/db-verify.mjs  # optional: dual-run acceptance against your own knowledge base
 node tests/judge-live.mjs # optional: real model + your own knowledge base, verdict cache only, never touches cards
 ```
 

@@ -12,14 +12,19 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # node:sqlite 从 22.5 起内置：让 CI 真的跑一遍 SQL 索引路线，而不是只跑回退路线
+          node-version: 22
 
       # 纯函数与知识库读写门禁，不联网
-      - name: selftest (65 checks)
+      - name: selftest (82 checks)
         run: node tests/selftest.mjs
+
+      # 索引层冒烟：建索引 / 增量镜像 / 重建 / 删掉后自动回退 JSON
+      - name: db-smoke (index layer)
+        run: node tests/db-smoke.mjs
 
       # 用假 ctx 驱动真实工具。其中 bili_learn 不带 transcript_text 的几例会真的访问
       # B 站接口拿元数据/字幕轨；数据中心 IP 可能被限流，所以这里不阻塞流水线。
-      - name: tool-test (11 tools)
+      - name: tool-test (12 tools)
         continue-on-error: true
         run: node tests/tool-test.mjs

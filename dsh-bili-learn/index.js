@@ -44,6 +44,7 @@ const DEFAULTS = {
   // 质检（判定交给模型，不用正则）：学完把卡片成批送模型判广告/口水话。
   judgeAfterLearn: true,
   judgeBatch: 12,
+  sqliteIndex: true,
   judgeMaxTokens: 1600,
   maxLearnMinutes: 0,
   injectIndex: true,
@@ -58,6 +59,7 @@ const SKILL_BODY = `# B 站视频学习闭环（dsh-bili-learn）
 - \`bili_learn\`：读视频 → 讲稿（带时间戳）→ 分段大纲 → 知识卡片，落盘到知识库。多 P 用 \`pages\` / \`all_pages\` 批量学，一页一目录。
 - \`bili_series\`：学「同一 UP 主的同一系列教程」——find 反查合集与全部集数、list 列 UP 主的合集、next 取下一集、learn 按顺序连学、cluster 按标题前缀聚组。
 - \`bili_recall\`：按问题检索已学会的卡片与讲稿证据（返回时间戳和回跳链接）。
+- \`bili_index\`：检索索引层（SQLite）。status 体检 / rebuild 重建 / verify 双跑比对。索引只是 JSON 的派生缓存，删掉就回退全扫，不丢知识。
 - \`bili_note\`：由你（模型）直接写/改知识卡片。
 - \`bili_filter\`：卡片质检——把卡片交给模型判是不是广告/引流/口水话（scan 预览 → apply 落账 → restore 放回并钉住 → stats 汇总）。判定是模型给的，插件不用正则猜。
 - \`bili_practice\`：列出待复习卡片（\`due\`）、记录自测结果（\`grade\`），驱动间隔复习。
@@ -89,7 +91,7 @@ const TOOL_TEXT = (value) => [{ type: 'text', text: typeof value === 'string' ? 
 
 export function apply(ctx, config) {
   const cfg = { ...DEFAULTS, ...(config ?? {}) };
-  const kb = new KnowledgeBase(cfg.kbDir || defaultKbRoot());
+  const kb = new KnowledgeBase(cfg.kbDir || defaultKbRoot(), { engine: cfg.sqliteIndex === false ? 'json' : 'auto' });
   const disposers = [];
 
   /**
@@ -599,17 +601,19 @@ export function apply(ctx, config) {
           series: { type: 'string', description: '限定某个系列（如 season:1234567，来自 bili_series）' },
           limit: { type: 'integer', description: '最多返回多少条（默认 8）' },
           with_lines: { type: 'boolean', description: '是否同时检索讲稿原文（默认 true）' },
+          engine: { type: 'string', enum: ['auto', 'sql', 'json'], description: 'auto=有 SQLite 索引就走索引（默认）；sql/json 用来强制对比两条路' },
         },
         required: ['query'],
       },
       output: { schema: { type: 'object' }, render: (_args, value) => TOOL_TEXT(value) },
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const hits = kb.search(args.query, { bvid: args.bvid, limit: Number(args.limit ?? 8), withLines: args.with_lines !== false });
+        const hits = kb.search(args.query, { bvid: args.bvid, series: args.series, limit: Number(args.limit ?? 8), withLines: args.with_lines !== false, engine: args.engine ?? 'auto' });
         const empty = hits.cards.length === 0 && hits.lines.length === 0;
         return {
           ok: true,
           query: args.query,
+          engine: hits.engine ?? 'json',
           cards: hits.cards.map((c) => ({
             id: c.id,
             bvid: c._video.bvid,
@@ -851,6 +855,90 @@ export function apply(ctx, config) {
           note: action === 'apply'
             ? `已按模型判定剔掉 ${removed} 张（卡片存进各页 filtered.json，模型的 verdict 与理由都留着，可 bili_filter restore 放回）。判不了的 ${unjudged.length} 张原样保留，没有删。`
             : `这是预览，没有改动卡片。判定由模型给出，理由见 samples[].reason；确认无误再 action=apply。判不了的 ${unjudged.length} 张不会被删。`,
+        };
+      },
+    }),
+  );
+
+  disposers.push(
+    ctx.tools.register({
+      name: 'bili_index',
+      description:
+        'SQLite 查询索引层（只是 JSON 的派生缓存，真相源仍是 cards.json，索引可随时删掉重建）。action=status 看索引与 JSON 是否一致；action=rebuild 全量重建；action=verify 同一批查询双跑 JSON 与 SQL，比对命中与耗时（这是「能不能信 SQL」的验收）。',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', enum: ['status', 'rebuild', 'verify'], description: 'status=体检；rebuild=重建；verify=双跑比对' },
+          queries: { type: 'array', items: { type: 'string' }, description: 'verify 用哪些查询；不给就自动从卡片结论里取样' },
+          limit: { type: 'integer', description: 'verify 取样查询数（默认 12）' },
+        },
+        required: ['action'],
+      },
+      output: { schema: { type: 'object' }, render: (_args, value) => TOOL_TEXT(value) },
+      isConcurrencySafe: () => true,
+      async execute(args, exec) {
+        kb.ensure();
+        const action = args.action ?? 'status';
+        if (action === 'status') return { ok: true, ...kb.indexStatus(), note: 'consistent=false 时先 action=rebuild。' };
+        if (action === 'rebuild') {
+          const t0 = Date.now();
+          const r = kb.rebuildIndex();
+          return { ok: r.ok !== false, ms: Date.now() - t0, ...r, note: '索引是从 JSON 重建出来的；JSON 一个字没动。索引文件可随时删除。' };
+        }
+        // verify：同一批查询跑两条路，比对命中集合与耗时——SQL 路线能不能用，用数据说话。
+        const limit = Number(args.limit ?? 12);
+        let queries = Array.isArray(args.queries) && args.queries.length > 0 ? args.queries : null;
+        if (!queries) {
+          const pool = [];
+          for (const entry of kb.listVideos()) {
+            for (const card of kb.load(entry.bvid, entry.page ?? 1)?.cards ?? []) {
+              const claim = String(card.claim ?? '');
+              if (claim.length >= 8) pool.push(claim.slice(Math.floor(claim.length / 2), Math.floor(claim.length / 2) + 2));
+              if (pool.length >= limit * 4) break;
+            }
+            if (pool.length >= limit * 4) break;
+          }
+          queries = [...new Set(pool)].slice(0, limit);
+        }
+        const rows = [];
+        let jsonMs = 0;
+        let sqlMs = 0;
+        let missing = 0;
+        let emptyBoth = 0;
+        for (const q of queries) {
+          if (exec?.signal?.aborted) break;
+          const t1 = Date.now();
+          const j = kb.search(q, { limit: 8, withLines: false, engine: 'json' });
+          const jMs = Date.now() - t1;
+          jsonMs += jMs;
+          const t2 = Date.now();
+          const s = kb.search(q, { limit: 8, withLines: false, engine: 'sql' });
+          const sMs = Date.now() - t2;
+          sqlMs += sMs;
+          const key = (c) => `${c._video?.bvid ?? c.bvid}:${c._video?.page ?? c.page}:${c.id}`;
+          const js = new Set(j.cards.map(key));
+          const ss = new Set(s.cards.map(key));
+          const miss = [...js].filter((x) => !ss.has(x));
+          missing += miss.length;
+          if (js.size === 0 && ss.size === 0) emptyBoth += 1;
+          rows.push({ query: q, json: js.size, sql: ss.size, overlap: [...js].filter((x) => ss.has(x)).length, jsonMs: jMs, sqlMs: sMs, missingInSql: miss.slice(0, 3) });
+        }
+        const ok = missing === 0;
+        return {
+          ok,
+          action: 'verify',
+          queries: rows.length,
+          jsonTotalMs: jsonMs,
+          sqlTotalMs: sqlMs,
+          speedup: sqlMs > 0 ? Number((jsonMs / sqlMs).toFixed(1)) : null,
+          missingInSql: missing,
+          emptyBoth,
+          perQuery: rows.slice(0, 12),
+          engineNow: kb.search(queries[0] ?? '景别', { limit: 1, withLines: false })?.engine ?? 'json',
+          note: ok
+            ? `双跑一致：SQL 没有漏掉任何 JSON 能查到的卡（${rows.length} 个查询）。可以按默认 engine=auto 用 SQL。`
+            : `SQL 漏了 ${missing} 条 JSON 能查到的卡——索引陈旧或缺失，先 action=rebuild 再 verify。`,
         };
       },
     }),

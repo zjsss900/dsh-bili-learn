@@ -3,6 +3,46 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-11-22
+
+### 新增 / Added
+
+- **查询索引层（第 12 个工具 `bili_index`）** — 规模上去以后「每次检索扫全部 JSON」是线性变糟的那条路。
+  新增 `<kb>/bili.sqlite`：`page` / `card` / `card_fts` / `line` / `line_fts` / `review` 六张表，
+  `status` 体检、`rebuild` 全量重建（实测 342 页 1546 卡 48033 讲稿行 2.4 秒，索引 15.3 MB）、
+  `verify` 两条路双跑比对 / A derived SQLite index for retrieval; rebuild, status, dual-run verify
+- **索引只是派生缓存** — JSON 仍是唯一真相源：删掉 `bili.sqlite` 就自动回退 JSON 全扫，不丢任何知识；
+  每次写卡片顺手镜像该页，镜像失败只记一笔，绝不回滚知识落盘 / disposable, never authoritative
+- **中文检索用 bigram 灌 `fts5(tokenize='unicode61')`** — 实测 `trigram` 对「景别」「轴线」这类两字词**完全不命中**（0 条），不可用
+  / bigram-indexed FTS5; the trigram tokenizer fails on 2-character Chinese terms
+- **口径只有一套** — SQLite 只做「含任一词元」的候选召回（那正是 `scoreCard` 打分 >0 的必要条件，所以候选集是 JSON 结果的超集），
+  最终排序仍由 `text.js` 那套打分与比较器决定；`bili_recall` 新增 `engine=auto|sql|json` 可强制对比
+  / SQL narrows candidates, the existing scorer decides ranking — one ranking semantic only
+- **配置** — `sqliteIndex`（默认 `true`）；老库索引为空时小库自动补建，大库提示用 `bili_index action=rebuild`
+
+### 变更 / Changed
+
+- `bili_recall` 修一个真洞：schema 里有 `series` 但 `execute` 没往下传，系列限定被静默忽略
+  / `series` filter was declared but never applied
+- 两条路的 tie-break 改为确定性比较（分数 → bvid → page → id），不再依赖索引插入顺序
+
+### 门禁 / Gates
+
+- selftest 47 → 65 → **82 checks**（新增索引层 17 项：bigram、候选召回、增量镜像、重建、删索引回退、
+  「两条路结果必须逐条一致」、以及「不许存在把排序交给 bm25 的写法」这类断言）
+- tool-test 覆盖 **12 个工具**（含 `bili_index` 的 rebuild/status/verify 端到端）
+- 新增 `tests/db-smoke.mjs`（任何运行时都能跑的索引冒烟）与 `tests/db-verify.mjs`（拿你自己的库做双跑验收）
+- CI 的 Node 从 20 升到 22：`node:sqlite` 从 22.5 起内置，CI 现在真的会跑 SQL 路线
+
+### 实测 / Measured（真实知识库，非合成数据）
+
+- 342 页 / 1546 卡 / 48033 讲稿行；全库 JSON 11.3 MB、2833 个文件
+- `bili_recall` 单查询 **195 ms → 1 ms**；60 个查询整体 11.8 s → 0.66 s（**17.8×**）
+- 双跑验收 **PASS**：60 个查询（含中英混排与专有名词）卡片 top8 **逐条一致、顺序一致、漏 0 条**；
+  讲稿行 5 组一致；跨页待复习列表一致
+- 100× 规模合成基准：15.46 万张卡插入含索引 13.4 s / 221 MB；bigram 查询 0–2 ms；无索引 `LIKE` 83 ms；
+  JSON 路线外推 29 s/查询 —— 这就是为什么需要索引层
+
 ## [0.4.0] - 2026-11-22
 
 ### 新增 / Added

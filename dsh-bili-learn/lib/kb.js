@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { formatTime, scoreCard, searchLines, tokenize, topTerms, clip } from './text.js';
 import { applyVerdicts } from './judge.js';
+import { IndexDb, rebuildIndex } from './db.js';
 
 const INDEX_VERSION = 1;
 // 复习间隔（天），下标即熟练度。
@@ -43,8 +44,10 @@ function readJsonSafe(file, fallback) {
 }
 
 export class KnowledgeBase {
-  constructor(root) {
+  constructor(root, { engine = 'auto' } = {}) {
     this.root = root;
+    // 'auto' = 有 SQLite 索引就走索引；'json' = 按配置彻底关掉索引层
+    this.engineDefault = engine;
   }
 
   ensure() {
@@ -73,6 +76,84 @@ export class KnowledgeBase {
     return readJsonSafe(path.join(this.root, 'index.json'), { version: INDEX_VERSION, videos: {}, series: {} });
   }
 
+  /**
+   * SQLite 查询索引：只是 JSON 的派生缓存，随时可删可重建。
+   * node:sqlite 不可用（老运行时/被禁用）时返回 null，所有查询自动走 JSON 路线。
+   */
+  indexDb() {
+    if (this._db === undefined) this._db = new IndexDb(this.root);
+    return this._db;
+  }
+
+  /**
+   * 索引空了（老库升级、或索引被删掉）时补建。只在小库上自动做——
+   * 大库一次重建可能要几分钟，不能塞进一次检索里，交给 bili_index action=rebuild。
+   */
+  ensureIndex() {
+    if (this.engineDefault === 'json') return false;
+    const db = this.indexDb();
+    if (!db?.open()) return false;
+    if ((db.counts()?.pages ?? 0) > 0) return true;
+    const entries = this.listVideos();
+    if (entries.length === 0) return false;
+    if (entries.length > 400) return false;
+    return this.rebuildIndex().ok === true;
+  }
+
+  /** 写完 JSON 后把这一页镜像进索引。索引失败绝不回滚知识，只在返回里说清楚。 */
+  syncPage(bvid, page = 1) {
+    const db = this.indexDb();
+    if (!db || !db.open()) return { ok: false, reason: db?.reason ?? '索引不可用' };
+    const store = this.load(bvid, page);
+    if (!store?.meta) return { ok: false, reason: '这一页没有落盘数据' };
+    const entry = this.readIndex().videos?.[pageKey(bvid, page)] ?? {};
+    const ok = db.syncPage({
+      bvid,
+      page,
+      meta: { ...store.meta, series: entry.series ?? null },
+      cards: store.cards,
+      lines: store.lines,
+      review: store.review ?? {},
+      counts: { cards: store.cards.length, dropped: (store.filtered ?? []).length, lines: (store.lines ?? []).length },
+    });
+    return { ok, reason: ok ? '' : db.reason };
+  }
+
+  /** 全量重建索引（JSON 是真相源，索引只是缓存）。 */
+  rebuildIndex(options) {
+    return rebuildIndex(this, options);
+  }
+
+  /** 索引与 JSON 是否一致（数量比对，给 verify 用）。 */
+  indexStatus() {
+    const db = this.indexDb();
+    const entries = this.listVideos();
+    let jsonPages = 0;
+    let jsonCards = 0;
+    let jsonLines = 0;
+    const dangling = [];
+    for (const entry of entries) {
+      const store = this.load(entry.bvid, entry.page ?? 1);
+      if (!store?.meta) {
+        dangling.push(`${entry.bvid} P${entry.page ?? 1}`);
+        continue;
+      }
+      jsonPages += 1;
+      jsonCards += store.cards.length;
+      jsonLines += store.lines.length;
+    }
+    const sql = db?.open() ? db.counts() : null;
+    return {
+      engine: sql ? 'sql' : 'json',
+      reason: sql ? '' : db?.reason ?? '',
+      json: { pages: jsonPages, cards: jsonCards, lines: jsonLines, indexEntries: entries.length },
+      sql,
+      // index.json 里有、页目录读不出来的条目（不是索引坏了，是历史脏条目）
+      dangling,
+      consistent: sql ? sql.pages === jsonPages && sql.cards === jsonCards : false,
+    };
+  }
+
   listVideos() {
     return Object.values(this.readIndex().videos ?? {}).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
   }
@@ -84,6 +165,8 @@ export class KnowledgeBase {
     const key = pageKey(meta.bvid, meta.page);
     index.videos[key] = { ...(index.videos[key] ?? {}), ...meta, page: Number(meta.page) || 1, ...counts, updatedAt: new Date().toISOString() };
     writeJsonAtomic(path.join(this.root, 'index.json'), index);
+    // 卡片级写入都会经过这里 → 顺手把这一页镜像进 SQLite 索引（失败不影响知识落盘）。
+    this.syncPage(meta.bvid, meta.page ?? 1);
     return key;
   }
 
@@ -327,6 +410,7 @@ export class KnowledgeBase {
       applied.push({ card_id: item.card_id, mastery: state.mastery, due: state.due });
     }
     writeJsonAtomic(path.join(this.videoDir(bvid, page), 'review.json'), review);
+    this.syncPage(bvid, page);
     return applied;
   }
 
@@ -346,7 +430,15 @@ export class KnowledgeBase {
   }
 
   /** 待复习卡片。不给 page 就把这个 bvid 的所有页一起算。 */
-  dueCards(bvid, { page, limit = 20, includeUnseen = true } = {}) {
+  dueCards(bvid, { page, limit = 20, includeUnseen = true, engine = this.engineDefault } = {}) {
+    if (engine !== 'json') {
+      this.ensureIndex();
+      const db = this.indexDb();
+      if (db?.open()) {
+        const rows = db.dueCards({ bvid, page, limit, includeUnseen });
+        if (rows && rows.length > 0) return rows;
+      }
+    }
     const wanted = this.pagesOf(bvid).filter((v) => page === undefined || (v.page ?? 1) === Number(page));
     const now = Date.now();
     const out = [];
@@ -365,9 +457,60 @@ export class KnowledgeBase {
     return out.slice(0, limit);
   }
 
-  search(query, { bvid, series, limit = 8, withLines = true } = {}) {
+  /**
+   * 检索。两条路共用同一套打分与排序（text.js 的 scoreCard / searchLines 口径），
+   * SQLite 只负责「含任一词元」的候选召回——那正是打分 >0 的必要条件，所以候选集是
+   * JSON 全扫结果的超集，最终结果必须逐条一致（实测拿真库 60 个查询双跑盯着）。
+   */
+  search(query, { bvid, series, limit = 8, withLines = true, engine = this.engineDefault } = {}) {
     const tokens = tokenize(query);
-    if (tokens.length === 0) return { cards: [], lines: [] };
+    if (tokens.length === 0) return { cards: [], lines: [], engine: 'none' };
+    const cmpCards = (a, b) => b._score - a._score
+      || String(a._video?.bvid ?? '').localeCompare(String(b._video?.bvid ?? ''))
+      || (a._video?.page ?? 1) - (b._video?.page ?? 1)
+      || String(a.id ?? '').localeCompare(String(b.id ?? ''));
+    const cmpLines = (a, b) => b.score - a.score
+      || a.t - b.t
+      || String(a.bvid).localeCompare(String(b.bvid))
+      || (a.page ?? 1) - (b.page ?? 1);
+    if (engine !== 'json') {
+      this.ensureIndex();
+      const db = this.indexDb();
+      const bvids = series ? (this.seriesProgress(series)?.learned ?? []).map((v) => v.bvid) : undefined;
+      if (db?.open() && (!series || bvids.length > 0)) {
+        const cand = db.cardCandidates(query, { tokens, bvid, bvids }) ?? [];
+        const lineCand = withLines ? (db.lineCandidates(query, { tokens, bvid }) ?? []) : [];
+        if (cand.length > 0 || lineCand.length > 0) {
+          const cardHits = [];
+          for (const c of cand) {
+            const score = scoreCard(c.card, tokens);
+            if (score > 0) cardHits.push({ ...c.card, _video: { bvid: c.bvid, page: c.page, title: c.title, url: c.url }, _score: score });
+          }
+          // 与 JSON 路线同样的「每页先取前 3 行」规则，否则全局 top-8 口径会偏
+          const perPage = new Map();
+          for (const l of lineCand) {
+            const bag = new Set(tokenize(l.text));
+            let score = 0;
+            for (const token of tokens) if (bag.has(token)) score += 1;
+            if (score <= 0) continue;
+            const key = `${l.bvid}|${l.page}`;
+            const list = perPage.get(key) ?? [];
+            list.push({ bvid: l.bvid, page: l.page, t: l.t, text: l.text, score, url: l.url });
+            perPage.set(key, list);
+          }
+          const lineHits = [];
+          for (const list of perPage.values()) {
+            list.sort((a, b) => b.score - a.score || a.t - b.t);
+            for (const hit of list.slice(0, 3)) {
+              lineHits.push({ bvid: hit.bvid, page: hit.page, t: hit.t, text: hit.text, score: hit.score, url: jumpUrl(hit.url ?? '', hit.t, hit.page) });
+            }
+          }
+          cardHits.sort(cmpCards);
+          lineHits.sort(cmpLines);
+          return { cards: cardHits.slice(0, limit), lines: lineHits.slice(0, limit), engine: 'sql', candidates: cand.length };
+        }
+      }
+    }
     const all = Object.values(this.readIndex().videos ?? {});
     let entries;
     if (bvid) entries = all.filter((v) => v.bvid === bvid);
@@ -391,9 +534,9 @@ export class KnowledgeBase {
         }
       }
     }
-    cardHits.sort((a, b) => b._score - a._score);
-    lineHits.sort((a, b) => b.score - a.score);
-    return { cards: cardHits.slice(0, limit), lines: lineHits.slice(0, limit) };
+    cardHits.sort(cmpCards);
+    lineHits.sort(cmpLines);
+    return { cards: cardHits.slice(0, limit), lines: lineHits.slice(0, limit), engine: 'json' };
   }
 
   stats() {

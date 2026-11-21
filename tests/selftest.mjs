@@ -289,5 +289,59 @@ check('judge prompt says: when unsure keep it', () => {
   return (src.includes('宁可留下') && src.includes('绝不误删知识')) || '质检提示词没有保守条款';
 });
 
+// ---------- SQLite 查询索引层（JSON 是真相源，索引可丢弃） ----------
+const dbMod = await import(root + 'lib/db.js');
+const HAVE_SQL = dbMod.sqliteAvailable();
+check('db module exposes availability + reason', () => typeof HAVE_SQL === 'boolean' && (HAVE_SQL || dbMod.sqliteReason().length > 0));
+check('bigram splits cjk into overlapping pairs', () => dbMod.bigram('景别轴线') === '景别 别轴 轴线' || dbMod.bigram('景别轴线'));
+check('bigram keeps latin tokens lowercase', () => dbMod.bigram('rank 值') === 'rank 值' || dbMod.bigram('rank 值'));
+check('queryTokens strips fts5 syntax chars', () => dbMod.queryTokens('正反打* (跳轴)').join(',') === '正反,反打,跳轴' || dbMod.queryTokens('正反打* (跳轴)').join(','));
+check('index mirrors json right after saveVideo', () => !HAVE_SQL || kb.indexStatus().consistent === true || JSON.stringify(kb.indexStatus()));
+for (const q of ['秩', '主元', '零空间', '正反打 跳轴', 'rank']) {
+  check(`sql recall never misses what json found for「${q}」`, () => {
+    if (!HAVE_SQL) return true;
+    const key = (c) => `${c._video?.bvid}:${c._video?.page ?? 1}:${c.id}`;
+    const js = kb.search(q, { limit: 8, withLines: false, engine: 'json' }).cards.map(key);
+    const ss = kb.search(q, { limit: 8, withLines: false, engine: 'sql' }).cards.map(key);
+    return js.join('|') === ss.join('|') || `json=[${js}] sql=[${ss}]`;
+  });
+}
+check('known term actually goes through sql engine', () => !HAVE_SQL || kb.search('秩', { limit: 3, withLines: false }).engine === 'sql' || kb.search('秩', { limit: 3, withLines: false }).engine);
+check('sql transcript hits keep the ?t= backlink', () => {
+  if (!HAVE_SQL) return true;
+  const l = kb.search('零空间', { limit: 3, withLines: true, engine: 'sql' }).lines;
+  return (l.length > 0 && l[0].url.includes('?t=')) || `lines=${l.length}`;
+});
+check('due list: sql card ids == json card ids', () => {
+  if (!HAVE_SQL) return true;
+  const j = kb.dueCards('BVDEMO000004', { limit: 50, engine: 'json' }).map((r) => r.card_id).sort();
+  const s = kb.dueCards('BVDEMO000004', { limit: 50, engine: 'sql' }).map((r) => r.card_id).sort();
+  return j.join() === s.join() || `json=[${j}] sql=[${s}]`;
+});
+check('incremental write is mirrored into the index', () => {
+  if (!HAVE_SQL) return true;
+  const existing = kb.load('BVDEMO000004', 1).cards;
+  kb.saveCards('BVDEMO000004', [...existing, { id: 'zz1', title: '索引增量', claim: '这张卡用来验证索引增量同步是否跟手。', evidence: [{ t: 300, quote: '索引增量同步' }] }], { page: 1 });
+  return kb.search('跟手', { limit: 3, withLines: false, engine: 'sql' }).cards.some((c) => c.id === 'zz1') || 'SQL 查不到刚写入的卡';
+});
+check('rebuild from json restores exact counts', () => {
+  if (!HAVE_SQL) return true;
+  const r = kb.rebuildIndex();
+  const st = kb.indexStatus();
+  return (r.ok === true && st.consistent === true) || JSON.stringify({ r, st });
+});
+check('index is disposable: after deleting it search still works (json fallback)', () => {
+  if (!HAVE_SQL) return true;
+  kb.indexDb().drop();
+  const st = kb.indexStatus();
+  const got = kb.search('秩', { limit: 3, withLines: false });
+  const back = kb.rebuildIndex();
+  return (st.consistent === false && got.cards.length > 0 && back.ok === true) || JSON.stringify({ st, cards: got.cards.length, back });
+});
+check('no sqlite dependency is required to answer (json path intact)', () => {
+  const j = kb.search('秩', { limit: 5, withLines: false, engine: 'json' });
+  return j.cards.length > 0 && j.engine === 'json' || `engine=${j.engine} cards=${j.cards.length}`;
+});
+
 console.log(failures.length === 0 ? `PASS ${total} checks` : `FAIL ${failures.length}/${total}\n- ${failures.join('\n- ')}`);
 process.exit(failures.length === 0 ? 0 : 1);
