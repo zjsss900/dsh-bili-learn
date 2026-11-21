@@ -117,6 +117,25 @@ check('distill happy path', () => (okRun.cards.length === 1 && okRun.cards[0].ti
 const emptyRun = await distill.distillSegments({ llm: emptyLlm, provider: 'x', model: 'y', meta: { title: 't' }, segments: [fakeSegment], maxCardsPerSegment: 5, maxTokens: 100 });
 check('distill honest unread on empty content', () => (emptyRun.cards.length === 0 && emptyRun.segmentReports[0].status === 'unread' && /思考/.test(emptyRun.segmentReports[0].note)) || JSON.stringify(emptyRun.segmentReports));
 
+// 长段整段输出被 maxTokens 截断 → 切两半补救（前两次调用给截断的半个 JSON，之后给正常的）
+let truncCalls = 0;
+const truncLlm = {
+  async *stream() {
+    truncCalls += 1;
+    if (truncCalls <= 2) {
+      yield { type: 'text-delta', index: 0, text: '[{"title":"轴线","kind":"concept","claim":"轴线一侧放五个机位","evidence":[{"t":5,"quote":"五个机位"}]},{"title":"景别","claim' };
+      yield { type: 'finish', reason: { kind: 'max-tokens' } };
+      return;
+    }
+    yield { type: 'text-delta', index: 0, text: '[{"title":"机位","kind":"procedure","claim":"轴线一侧设五个机位才不会跳轴","evidence":[{"t":5,"quote":"五个机位"}]}]' };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  },
+};
+const longSeg = { index: 0, start: 0, end: 600, text: `${'轴线一侧设五个机位，正反打才不会跳轴。'.repeat(30)}\n${'决定景别的核心是这句话要强调什么。'.repeat(30)}`, keyTerms: [] };
+const truncRun = await distill.distillSegments({ llm: truncLlm, provider: 'x', model: 'y', meta: { title: 't' }, segments: [longSeg], maxCardsPerSegment: 5, maxTokens: 200 });
+check('长段截断会切两半补救，而不是直接 unread',
+  () => (truncRun.cards.length === 2 && truncRun.segmentReports[0].status === 'distilled' && /切两半/.test(truncRun.segmentReports[0].note)) || JSON.stringify({ calls: truncCalls, r: truncRun.segmentReports, n: truncRun.cards.length }));
+
 // ---------------------------------------------------------------- 系列（合集）：fixture，不联网
 const viewFix = {
   bvid: 'BV1SERIES0001',

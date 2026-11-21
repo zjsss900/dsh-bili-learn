@@ -221,10 +221,11 @@ B 站教程里混着求三连、加群领资料、卖课、片尾致谢，以及
 ## 自检
 
 ```bash
-node tests/selftest.mjs       # 82 项：分段/文稿/知识库/复习/字幕/提取器两条路径/质检记账与回滚/索引层与两条路一致
+node tests/selftest.mjs       # 83 项：分段/文稿/知识库/复习/字幕/提取器两条路径（含长段截断切半补救）/质检记账与回滚/索引层两条路一致
 node tests/tool-test.mjs      # 用假 ctx 跑全部 12 个工具，校验输出是 lossless JSON
 node tests/db-smoke.mjs       # 索引层冒烟：建/镜像/增量/重建/删掉后回退 JSON
 node tests/db-real-verify.mjs # 真知识库双跑验收：60 查询卡片逐条一致 + 讲稿行 + 待复习 + 计时（要传 BILI_KB）
 node tests/judge-live.mjs     # 真模型 + 真知识库验收判定（只写缓存，不动卡片）
+node tests/relearn.mjs BV…    # 只重跑 status=unread 的段（补提取，按 id 去重追加）
 ```
 

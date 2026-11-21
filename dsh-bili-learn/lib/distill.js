@@ -89,14 +89,18 @@ export async function callModel({ llm, provider, model, userText, maxTokens, sys
 export async function distillSegments({ llm, provider, model, meta, segments, maxCardsPerSegment = 5, maxTokens = 1400, signal, onProgress }) {
   const cards = [];
   const reports = [];
-  for (const segment of segments) {
-    const header = `视频：${meta.title}\n本段时间：${formatTime(segment.start)} – ${formatTime(segment.end)}\n要求：最多 ${maxCardsPerSegment} 张卡片。\n\n讲稿：\n${segment.text}\n`;
-    let contentAttempts = 0;
-    let transportRetries = 0;
+  /**
+   * 一段的两轮尝试（第一轮常规，第二轮收紧）。抽出来是为了能对「切半的子段」复用——
+   * 实测本地模型在整段讲稿太长时会把 JSON 输出写到被 maxTokens 截断，切两半就不翻车。
+   */
+  const runAttempts = async (seg, { cap, tokens }) => {
+    const head = (maxCards) => `视频：${meta.title}\n本段时间：${formatTime(seg.start)} – ${formatTime(seg.end)}\n要求：最多 ${maxCards} 张卡片。\n\n讲稿：\n${seg.text}\n`;
     let produced = [];
     let explicitEmpty = false;
     let note = '';
     let reasoningChars = 0;
+    let contentAttempts = 0;
+    let transportRetries = 0;
     // 内容失败与传输失败分开计数：网络抖动不该浪费一次「收紧提示」的重试机会。
     while (produced.length === 0 && !explicitEmpty && contentAttempts < 2 && transportRetries < 3) {
       const tight = contentAttempts > 0;
@@ -106,9 +110,9 @@ export async function distillSegments({ llm, provider, model, meta, segments, ma
           provider,
           model,
           userText: tight
-            ? `${header}\n\n上一次输出不可用（思考 ${reasoningChars} 字）。这次禁止思考，直接以 [ 开头输出最多 3 张卡片。`
-            : header,
-          maxTokens: tight ? maxTokens * 2 : maxTokens,
+            ? `${head(2)}\n上一次输出不可用（思考 ${reasoningChars} 字，可能正文被 maxTokens 截断）。这次禁止思考，直接以 [ 开头输出：最多 2 张卡片，每张 evidence 只留 1 条，quote 不超过 20 字。`
+            : head(cap),
+          maxTokens: tight ? tokens * 2 : tokens,
           signal,
         });
         contentAttempts += 1;
@@ -118,7 +122,7 @@ export async function distillSegments({ llm, provider, model, meta, segments, ma
           // 空数组是模型明确说这段没有知识点（只有广告/口水/纯展示），不是失败，别重试。
           explicitEmpty = true;
           note = '模型判定本段无知识点（广告/口水/纯展示）';
-        } else if (parsed) produced = normalizeCards(parsed, { limit: tight ? 3 : maxCardsPerSegment, segment });
+        } else if (parsed) produced = normalizeCards(parsed, { limit: tight ? 3 : cap, segment: seg });
         else if (!outcome.text.trim()) note = `正文为空（思考占 ${reasoningChars} 字${outcome.truncated ? '，且被 maxTokens 截断' : ''}）`;
         else note = outcome.truncated ? `输出被 maxTokens 截断，未能解析（正文 ${outcome.text.length} 字）` : '输出不是可解析的 JSON 数组';
       } catch (error) {
@@ -128,12 +132,33 @@ export async function distillSegments({ llm, provider, model, meta, segments, ma
         await new Promise((resolve) => setTimeout(resolve, 3000));
       }
     }
+    return { produced, explicitEmpty, note };
+  };
+  const breakNear = (text, at) => {
+    const nl = text.lastIndexOf('\n', at);
+    return nl > text.length * 0.25 ? nl : Math.floor(at);
+  };
+
+  for (const segment of segments) {
+    let { produced, explicitEmpty, note } = await runAttempts(segment, { cap: maxCardsPerSegment, tokens: maxTokens });
+    let rescued = false;
+    if (produced.length === 0 && !explicitEmpty && !signal?.aborted && segment.text.length > 900) {
+      // 第三道兜底：整段太长 → 切两半分别提，各要 ≤3 张。两半都要跑（各自有自己的知识点，不能只跑前半）
+      const cut = breakNear(segment.text, Math.floor(segment.text.length / 2));
+      const a = await runAttempts({ ...segment, text: segment.text.slice(0, cut) }, { cap: 3, tokens: maxTokens * 2 });
+      const b = signal?.aborted ? { produced: [], note: '' } : await runAttempts({ ...segment, text: segment.text.slice(cut) }, { cap: 3, tokens: maxTokens * 2 });
+      produced = [...a.produced, ...b.produced];
+      if (produced.length > 0) {
+        rescued = true;
+        note = `整段输出被截断，已切两半补救（前半 ${a.produced.length} 张 / 后半 ${b.produced.length} 张）`;
+      } else note = a.note || b.note || note;
+    }
     if (produced.length === 0) {
       segment.status = explicitEmpty ? 'noise' : 'unread';
       segment.note = note || '模型没有产出卡片';
     } else {
       segment.status = 'distilled';
-      segment.note = '';
+      segment.note = rescued ? note : '';
       cards.push(...produced);
     }
     reports.push({ index: segment.index, status: segment.status, cards: produced.length, note: segment.note });

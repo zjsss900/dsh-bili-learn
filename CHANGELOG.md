@@ -3,6 +3,21 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.1] - 2026-11-22
+
+### 修复 / Fixed
+
+- **本地模型长段提取会被 maxTokens 截断** — 实测连续两个视频各有一段输出被截断，整段只能标 `unread`。
+  现在第三道兜底：整段失败且讲稿超过 900 字时，自动切两半分别提（各 ≤3 张卡），收紧提示同时要求
+  「evidence 只留 1 条、quote ≤ 20 字」。真库验收：两段原本 `unread` 的段补出 4 张卡，各 43 秒
+  / long segments are now split in half when the model's JSON output gets truncated
+- 附带 `.tools/relearn.mjs`（发布树 `tests/relearn.mjs`）：只重跑 `segments.json` 里 `status=unread` 的段，
+  按时间窗从讲稿重建正文，补出的卡按 id 去重后追加，并把该段改标 `distilled`
+
+### 门禁 / Gates
+
+- selftest 82 → **83 checks**：新增「长段截断会切两半补救，而不是直接 unread」断言
+
 ## [0.5.0] - 2026-11-22
 
 ### 新增 / Added
