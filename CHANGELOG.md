@@ -3,35 +3,6 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.6.0] - 2026-11-22
-
-### 新增 / Added
-
-- **语义检索（可选，默认关）**：补关键词的盲区。真库 1786 卡实测——「出图的时候画幅比例怎么选」关键词**答不出**，
-  语义首位给出「角色用 9:16，场景用 16:9」（这张卡里没有「画幅比例」四个字）；10 条自然语言查询语义命中 8/10、关键词 7/10，
-  其中 2 条是关键词路线答不出的。
-  - `tools/embed.py`：本地 embedding，**只用 CPU**（脚本里硬写 `CUDA_VISIBLE_DEVICES=""`；20G 卡上 Strata 常驻 ~19.8G，绝不抢显存）。
-    模型 `BAAI/bge-small-zh-v1.5`（91 MB / 512 维；huggingface 连不上，从 ModelScope 拉文件）。全库 1786 张嵌完 42 s。
-    子命令 `cards`（批量）/ `query`（单条）/ `serve`（查询侧常驻，闲置 900 秒自杀，不泄漏进程）/ `selftest`（质量门禁）
-  - `lib/vec.js`：`card_vec` 按 `(bvid,page,cid,model)` 主键 + **内容指纹增量**（改一张只重嵌一张）。
-    默认**精确暴力扫**（1786×512 一次约 3 ms，精确且零依赖）；sqlite-vec 的 `vec0` 扩展加载得动才启用 ANN，
-    且 **ANN 与精确不一致时以精确为准**（真库 10/10 一致）——排序口径仍然只有一套。
-  - `bili_recall` 新增 `mode: keyword|semantic|mixed`：默认 `keyword`（与以前逐字节一致）；`mixed` 用倒数排名融合（RRF），
-    不把语义分数和关键词分数相加——两种量纲不可比。
-  - `bili_index action=vector`：看待嵌清单、把 embedding 输出的 jsonl 灌进索引、体检（模型/行数/维度/扩展/虚表）。
-  - 底线和全文索引层完全一致：**向量也是可丢弃的派生缓存**，JSON 才是真相源；语义只多出一路候选，
-    向量坏了就回退关键词，绝不少答、绝不动知识。
-- 新门禁：`selftest` 87 → 94（注入确定性假 embedding，离线测**接线**：增量、跨页同 id、删表后诚实回退、ANN 与精确一致）；
-  `tests/vec-verify.mjs`（真库语义验收）；`python tools/embed.py selftest`（小模型对措辞敏感，断言「期望卡在 top3」而不是 top1）。
-
-### 修复 / Fixed
-
-- `pendingItems` 只按 `cid` 比对内容指纹：卡片 id 只在**页内**唯一（真库几十页都有 `s0-1`），跨页串指纹 → 灌完向量仍永远算「待嵌」。
-  改按 `bvid|page|cid`。新加的验收门禁当场逮到。
-- `vec0` 扩展必须在**建立连接时**就 `allowExtension: true`，事后调 `enableLoadExtension` 会报
-  "Cannot enable extension loading because it was disabled at database creation"。现在只有配了 `vecExtPath`（或把 `vec0.dll` 放进 kbDir）
-  才开这个能力面，默认仍关闭。
-
 ## [0.5.3] - 2026-11-22
 
 ### 修复 / Fixed

@@ -16,7 +16,7 @@ jobs:
           node-version: 22
 
       # 纯函数与知识库读写门禁，不联网
-      - name: selftest (94 checks)
+      - name: selftest (87 checks)
         run: node tests/selftest.mjs
 
       # 索引层冒烟：建索引 / 增量镜像 / 重建 / 删掉后自动回退 JSON
