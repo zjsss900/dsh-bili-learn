@@ -60,6 +60,21 @@ for (const f of files.filter((p) => /\.(js|mjs|py|md|json|yml|txt)$/.test(p))) {
   } catch { /* 读不到就算了 */ }
 }
 
+// 身份哨兵：mid / 合集 id / series key 只允许 fixture 用的假号。
+// 真实 mid 与合集 id 会暴露「这个人学过哪个 UP 主的哪个合集」——那是使用者的痕迹。
+const FAKE_ID = new Set(['123456789', '1234567', '777', '12345678', '100000001']);
+for (const f of files.filter((p) => /\.(js|mjs|py|md|json|yml|txt)$/.test(p))) {
+  try {
+    const t = fs.readFileSync(f, 'utf8');
+    for (const m of t.matchAll(/\b(?:mid|ownerMid|owner_mid|season_id|series_id|seasonId|seriesId)\s*[:=]\s*['"]?(\d{4,})/g)) {
+      if (!FAKE_ID.has(m[1])) fails.push(`${f} 里有真实身份 id ${m[1]}（mid/合集 id 属于使用者，fixture 用 123456789 / 1234567）`);
+    }
+    for (const m of t.matchAll(/\bseason:(\d{5,})\b/g)) {
+      if (!FAKE_ID.has(m[1])) fails.push(`${f} 里有真实合集 key season:${m[1]}（fixture 用 season:1234567）`);
+    }
+  } catch { /* 读不到就算了 */ }
+}
+
 console.log(`repo-hygiene：扫了 ${files.length} 个被跟踪文件`);
 if (fails.length) {
   console.log(`FAIL repo-hygiene（${fails.length} 条）：`);

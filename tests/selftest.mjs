@@ -252,11 +252,11 @@ check('ANN 可用则与精确暴力同一结论；不可用则走精确暴力', 
 
 // ---------------------------------------------------------------- 系列（合集）：fixture，不联网
 const viewFix = {
-  bvid: 'BV1SERIES0001',
+  bvid: 'BVDEMO000031',
   owner: { mid: 123456789, name: '某UP' },
   ugc_season: { id: 1234567, title: 'MiniMax-H3系列', mid: 123456789, sections: [{ title: '正片' }] },
 };
-const ep = (i) => ({ aid: 100 + i, bvid: `BVDEMO000010${i}`, title: `H3 打斗精讲 第${i}集`, duration: 600 + i, pubdate: 1700000000 + i * 86400, pic: '' });
+const ep = (i) => ({ aid: 100 + i, bvid: `BVDEMO0000${30 + i}`, title: `H3 打斗精讲 第${i}集`, duration: 600 + i, pubdate: 1700000000 + i * 86400, pic: '' });
 const page1 = { archives: [ep(1), ep(2), ep(3)], page: { total: 4 } };
 const page2 = { archives: [ep(4)], page: { total: 4 } };
 const listFix = {
@@ -276,11 +276,11 @@ const fakeBili = {
   },
 };
 
-const season = await seriesMod.seasonOfVideo(fakeBili, 'BV1SERIES0001');
+const season = await seriesMod.seasonOfVideo(fakeBili, 'BVDEMO000031');
 check('seasonOfVideo key/title/mid', () => (season.key === 'season:1234567' && season.title === 'MiniMax-H3系列' && season.mid === 123456789) || JSON.stringify(season));
 const { episodes, total: seasonTotal } = await seriesMod.seasonArchives(fakeBili, { mid: 123456789, season_id: 1234567 });
 check('seasonArchives paginates to total', () => (episodes.length === 4 && seasonTotal === 4) || `eps=${episodes.length} total=${seasonTotal}`);
-check('seasonArchives keeps collection order with 1-based index', () => (episodes[0].bvid === 'BV1SERIES0001' && episodes[3].index === 4) || episodes.map((e) => e.index).join(','));
+check('seasonArchives keeps collection order with 1-based index', () => (episodes[0].bvid === 'BVDEMO000031' && episodes[3].index === 4) || episodes.map((e) => e.index).join(','));
 const collections = await seriesMod.listCollections(fakeBili, 123456789);
 check('listCollections covers seasons and series', () => (collections.length === 2 && collections[0].key === 'season:1234567' && collections[1].key === 'series:777') || JSON.stringify(collections.map((c) => c.key)));
 check('listCollections strips 合集· prefix but keeps raw', () => (collections[0].title === 'MiniMax-H3系列' && collections[0].raw_title === '合集·MiniMax-H3系列') || JSON.stringify(collections[0]));
@@ -293,14 +293,14 @@ check('clusterByPrefix groups same-series titles', () => (clusters.length === 1 
 kb.saveSeries({ ...season, total: 4 }, episodes);
 check('series saved', () => kb.getSeries('season:1234567')?.episodes.length === 4);
 let progress = kb.seriesProgress('season:1234567');
-check('progress: nothing learned, next is ep1', () => (progress.learned.length === 0 && progress.missing.length === 4 && progress.next.bvid === 'BV1SERIES0001') || JSON.stringify(progress.next));
-const seriesMeta = { ...meta, bvid: 'BV1SERIES0001', title: 'H3 打斗精讲 第1集', series: { key: 'season:1234567', index: 1, total: 4, title: 'MiniMax-H3系列' } };
+check('progress: nothing learned, next is ep1', () => (progress.learned.length === 0 && progress.missing.length === 4 && progress.next.bvid === 'BVDEMO000031') || JSON.stringify(progress.next));
+const seriesMeta = { ...meta, bvid: 'BVDEMO000031', title: 'H3 打斗精讲 第1集', series: { key: 'season:1234567', index: 1, total: 4, title: 'MiniMax-H3系列' } };
 kb.saveVideo({ meta: seriesMeta, lines: lines.slice(0, 10), segments: segs.slice(0, 1), cards: [], warnings: [] });
 progress = kb.seriesProgress('season:1234567');
-check('progress after learning ep1', () => (progress.learned.length === 1 && progress.missing.length === 3 && progress.next.bvid === 'BV1SERIES0002') || JSON.stringify({ l: progress.learned.length, m: progress.missing.length, n: progress.next?.bvid }));
-check('video tagged with series', () => kb.listVideos().find((v) => v.bvid === 'BV1SERIES0001')?.series?.key === 'season:1234567');
+check('progress after learning ep1', () => (progress.learned.length === 1 && progress.missing.length === 3 && progress.next.bvid === 'BVDEMO000032') || JSON.stringify({ l: progress.learned.length, m: progress.missing.length, n: progress.next?.bvid }));
+check('video tagged with series', () => kb.listVideos().find((v) => v.bvid === 'BVDEMO000031')?.series?.key === 'season:1234567');
 check('search scoped to series finds its card', () => {
-  kb.saveCards('BV1SERIES0001', [{ id: 's1', title: '起手式', claim: '先定景别再谈运镜', evidence: [{ t: 30, quote: '先定景别' }], tags: ['景别'], confidence: 'high' }]);
+  kb.saveCards('BVDEMO000031', [{ id: 's1', title: '起手式', claim: '先定景别再谈运镜', evidence: [{ t: 30, quote: '先定景别' }], tags: ['景别'], confidence: 'high' }]);
   const inSeries = kb.search('景别', { series: 'season:1234567' });
   const otherSeries = kb.search('景别', { series: 'season:0000' });
   return (inSeries.cards.length >= 1 && otherSeries.cards.length === 0) || `in=${inSeries.cards.length} out=${otherSeries.cards.length}`;
@@ -315,7 +315,7 @@ check('stats lists series progress', () => {
 const multi = { ...meta, bvid: 'BVDEMO000011', title: '多P课程', duration: 600 };
 kb.saveVideo({ meta: { ...multi, page: 1, part: 'P1 导论' }, lines: lines.slice(0, 5), segments: segs.slice(0, 1), cards: [{ id: 'm1', title: 'P1 要点', claim: '第一页把导演的职责拆成现场与后期两段', how: ['现场盯调度', '后期盯剪辑'], evidence: [{ t: 10, quote: '第一页先把职责拆开讲' }] }], warnings: [] });
 kb.saveVideo({ meta: { ...multi, page: 2, part: 'P2 进阶' }, lines: lines.slice(0, 3), segments: segs.slice(0, 1), cards: [{ id: 'm2', title: 'P2 要点', claim: '第二页讲类型片要先立观众预期', how: ['先列类型', '再列预期'], evidence: [{ t: 20, quote: '第二页讲类型与预期' }] }], warnings: [] });
-check('multi-P: P1 files survive after learning P2', () => fs.existsSync(path.join(dir, 'BVDEMO000011', 'cards.json')) && fs.existsSync(path.join(dir, 'BV1MULTI0001_p2', 'cards.json')));
+check('multi-P: P1 files survive after learning P2', () => fs.existsSync(path.join(dir, 'BVDEMO000011', 'cards.json')) && fs.existsSync(path.join(dir, 'BVDEMO000011_p2', 'cards.json')));
 check('multi-P: both pages keep their own cards', () => (kb.load('BVDEMO000011', 1).cards.length === 1 && kb.load('BVDEMO000011', 2).cards.length === 1) || 'cards lost');
 check('multi-P: index lists every page', () => kb.pagesOf('BVDEMO000011').map((v) => v.page).join(',') === '1,2' || JSON.stringify(kb.pagesOf('BVDEMO000011')));
 check('multi-P: saveCards targets one page only', () => {

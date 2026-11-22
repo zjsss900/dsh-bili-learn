@@ -97,9 +97,14 @@ check('relearn warns about kept transcript', (relearn?.warnings ?? []).some((w) 
 const forced = await run('bili_learn', { url: 'BV1tRxt68EZa', force: true, transcript_text: fixture, distill: false });
 check('force relearns', forced?.skipped !== true && forced?.coverage?.lines === 21, JSON.stringify(forced?.coverage));
 
-const noSub = await run('bili_learn', { url: 'BVDEMO000006' });
-check('learn without transcript returns lossless', noSub !== undefined && noSub?.coverage?.lines === 0, JSON.stringify(noSub?.coverage ?? noSub));
-check('learn without transcript warns honestly', (noSub?.warnings ?? []).some((w) => w.includes('字幕')), JSON.stringify(noSub?.warnings));
+// 元数据接口失败时的诚实行为（BVDEMO000006 是不存在的稿件号；真实稿件号是作者的学习记录，不入库）。
+// 没给讲稿 → 如实返回失败，不崩、不动知识库；给了讲稿 → 用占位元数据继续，别浪费用户手上的材料。
+const dead = await run('bili_learn', { url: 'BVDEMO000006' });
+check('learn fails honestly when metadata is unreachable', dead?.ok === false && /元数据|code=-\d+/.test(`${dead?.error ?? ''} ${(dead?.warnings ?? []).join(' ')}`), JSON.stringify(dead));
+check('honest failure leaves the knowledge base untouched', !fs.existsSync(path.join(kbDir, 'BVDEMO000006')), kbDir);
+
+const offline = await run('bili_learn', { url: 'BVDEMO000008', transcript_text: '[00:01] 占位讲稿第一句\n[00:09] 占位讲稿第二句，一键三连 出现在这里', distill: false });
+check('a provided transcript survives a dead metadata API', (offline?.coverage?.lines ?? 0) >= 1 && (offline?.cards ?? 0) === 0 && (offline?.warnings ?? []).some((w) => w.includes('占位元数据')), JSON.stringify({ cov: offline?.coverage, cards: offline?.cards, w: offline?.warnings }));
 
 await run('bili_note', { bvid: 'BV1tRxt68EZa', cards: [{ id: 'k1', title: '秩', claim: '秩=主元个数', evidence: [{ t: 14, quote: '矩阵的秩，就是它化简以后主元的个数' }] }] });
 const replaced = await run('bili_note', { bvid: 'BV1tRxt68EZa', replace: true, cards: [{ id: 'k2', title: '替换', claim: 'replace 会删掉旧卡', evidence: [{ t: 14, quote: '矩阵的秩' }] }] });
