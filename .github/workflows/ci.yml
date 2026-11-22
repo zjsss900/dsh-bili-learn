@@ -15,6 +15,10 @@ jobs:
           # node:sqlite 从 22.5 起内置：让 CI 真的跑一遍 SQL 索引路线，而不是只跑回退路线
           node-version: 22
 
+      # 仓库卫生：不许有向量库、查询索引、学到的卡片或技能（合成样例除外）。这条必须绿。
+      - name: repo-hygiene (no KB data, no vectors)
+        run: node tests/repo-hygiene.mjs
+
       # 纯函数与知识库读写门禁，不联网
       - name: selftest (87 checks)
         run: node tests/selftest.mjs

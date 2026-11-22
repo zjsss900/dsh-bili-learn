@@ -16,6 +16,10 @@
 - 两个钉死的位置，谁也丢不了：`v0.5.3-pure-sqlite`（纯 SQLite）、`v0.6.0-semantic`（语义版）。
   两边**知识库格式完全一致**（JSON 是真相源），分支只多出 `bili_recall mode:semantic|mixed`、`bili_index action=vector`
   和 `card_vec` 向量缓存；主线删掉 `bili.sqlite` 或分支删掉向量表都不影响知识本体。
+- **数据策略（两条线都适用）**：代码库只发代码加一份明确标注为合成的样例（`examples/`、`tests/fixtures/`）。
+  学到的卡片、生成的技能、`bili.sqlite`、向量表与向量中间文件（`*.jsonl`、`vec0.*`）都属于使用者，**不进仓库**；
+  已经提交过的那份样例技能已从**全部分支与全部历史**移除（`git filter-branch` + 强推，历史里 `git log --all -- skills` 为空，
+  全历史最大 blob 只有 27 KB 的自检脚本）。`tests/repo-hygiene.mjs` 把这条变成断言，CI 每次都跑。
 
 ## [0.5.3] - 2026-11-22
 
@@ -219,6 +223,8 @@
 - **扫码登录**：`bili_login` 本地渲染二维码 → 轮询 → 写入 `cookieFile`，不把登录令牌交给第三方
   / QR login rendered locally; the token never leaves your machine
 - **样例技能**：`skills/h3-blocking-performance/SKILL.md`（AI 视频的人物站位、镜头衔接与表演）
+  —— 该文件后来从仓库**与全部历史**里移除：从真实视频学出来的卡片与技能属于学习者，代码库不发这些内容；
+  新增 `tests/repo-hygiene.mjs` 断言这一点（CI 跑）。
   / A sample skill produced by the loop
 - **门禁 / Gates**：`tests/selftest.mjs`（24 项）、`tests/tool-test.mjs`（9 个工具输出无损）
 - **CI**：`.github/workflows/ci.yml`

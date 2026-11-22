@@ -12,6 +12,18 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# 学到的东西不属于仓库：卡片、技能、索引、向量（tests/repo-hygiene.mjs 会断言这条）
+skills/
+*.sqlite
+*.sqlite-*
+*.jsonl
+vec0.dll
+vec0.so
+vec0.dylib
+vecpkg/
+vec-pending.jsonl
+vec-out.jsonl
+
 # 系统
 .DS_Store
 Thumbs.db

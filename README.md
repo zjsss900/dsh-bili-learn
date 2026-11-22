@@ -150,10 +150,10 @@ Bilibili does not serve subtitle tracks to anonymous requests. Two ways in:
 bili_search  →  pick the tutorials
 bili_learn   →  5 videos, 27 timestamped cards
 bili_recall  →  pull the relevant cards before writing prompts
-bili_skill   →  produce skills/h3-blocking-performance/SKILL.md
+bili_skill   →  write skills/h3-blocking-performance/SKILL.md into ~/.dsh/skills/ (on your machine, never shipped)
 ```
 
-`skills/h3-blocking-performance/SKILL.md` in this repo is the output of exactly that chain: a reusable rule sheet on blocking, shot-to-shot continuity and performance for AI-generated video. Every rule links back to its source video at a timestamp, and conclusions that came from our own local render tests are labelled as such.
+That chain produced a reusable rule sheet on blocking, shot-to-shot continuity and performance for AI-generated video: every rule links back to its source video at a timestamp, and conclusions from our own local render tests are labelled as such. It lives in the author's local `~/.dsh/skills/` and is **not in this repository** — cards and skills distilled from real videos belong to whoever learned them, so the repo ships code plus a clearly synthetic example, never a learned knowledge base and never a vector store.
 
 `examples/bili-kb/` shows what one learned video looks like on disk:
 
@@ -174,6 +174,7 @@ examples/bili-kb/BV1tRxt68EZa/
 ```bash
 node tests/selftest.mjs   # PASS 87 checks   pure functions and knowledge-base gates (series progress, per-page isolation, judgment bookkeeping + rollback, index-layer parity, stale-index self-heal, colliding card ids renamed)
 node tests/tool-test.mjs  # PASS 12 tools    drives the real tools with a fake ctx, checks lossless output
+node tests/repo-hygiene.mjs # PASS repo-hygiene asserts the repo holds no vector store, no index, no learned cards or skills (synthetic sample excluded; runs in CI)
 node tests/db-smoke.mjs   # PASS 22 checks   index layer smoke: build / mirror / incremental / rebuild / fallback after deletion / external-write detection
 node tests/fix-dup-ids.mjs # repairs history: renames colliding card ids within a page (both cards kept), then rebuilds the index (needed for libraries learned on 0.5.2 or earlier)
 node tests/db-verify.mjs  # optional: dual-run acceptance against your own knowledge base
@@ -185,7 +186,7 @@ CI runs the first gate on every push; the second one touches the live Bilibili A
 
 ## Privacy
 
-This repository contains no cookies, account IDs, session tokens or machine-specific absolute paths. Commit history uses a GitHub noreply address.
+This repository contains no cookies, account IDs, session tokens or machine-specific absolute paths; and no learned cards, generated skills, query index (`bili.sqlite`) or vector store (`*.jsonl`, `vec0.*`) — those stay on the user's machine, and `tests/repo-hygiene.mjs` asserts it in CI. Commit history uses a GitHub noreply address.
 `.gitignore` covers `cookie.txt`, `**/bili-kb/` (except the sample directory), `.out/` and `*.log`.
 
 ## License

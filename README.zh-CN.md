@@ -149,10 +149,10 @@ B 站对匿名请求不下发字幕轨。两条路：
 bili_search  →  挑教程
 bili_learn   →  5 期教程，27 张带时间戳的卡片
 bili_recall  →  写分镜前先把相关卡片捞出来
-bili_skill   →  生成技能 skills/h3-blocking-performance/SKILL.md
+bili_skill   →  生成技能到 ~/.dsh/skills/h3-blocking-performance/SKILL.md（在本机，不入库）
 ```
 
-仓库里 `skills/h3-blocking-performance/SKILL.md` 就是这条链路的产物：一份关于「AI 视频的人物站位、镜头衔接与表演」的可复用规则清单，每条规则都挂着原视频的时间戳链接，另外标注了哪些结论来自本地实测而非教程。
+这条链路产出过一份关于「AI 视频的人物站位、镜头衔接与表演」的可复用规则清单：每条规则都挂着原视频的时间戳链接，并标注哪些结论来自本地实测而非教程。它写在作者的 `~/.dsh/skills/` 下，**本仓库不含它**——从真实视频学出来的卡片和技能属于学习者，仓库只发代码加一份明确标注为合成的样例，不发学到的知识库，更不发向量库。
 
 `examples/bili-kb/` 是一个学完的视频长什么样：
 
@@ -173,6 +173,7 @@ examples/bili-kb/BV1tRxt68EZa/
 ```bash
 node tests/selftest.mjs   # PASS 87 checks   纯函数与知识库门禁（系列进度、多 P 互不覆盖、质检记账与回滚、索引层两条路一致、索引陈旧自愈、卡片 id 撞车改名保留）
 node tests/tool-test.mjs  # PASS 12 tools    用假 ctx 驱动 12 个真实工具，验证输出无损
+node tests/repo-hygiene.mjs # PASS repo-hygiene 断言仓库里没有向量库、索引、学到的卡片与技能（合成样例除外，CI 每次都跑）
 node tests/db-smoke.mjs   # PASS 22 checks   索引层冒烟：建/镜像/增量/重建/删掉后自动回退 JSON、指纹发现外部写入
 node tests/fix-dup-ids.mjs # 修历史数据：一页内卡片 id 撞车的改名保留两张，顺手重建索引（0.5.2 及之前学到的库可能需要）
 node tests/db-verify.mjs  # 可选：拿你自己的知识库做双跑验收（卡片逐条一致 + 讲稿行 + 待复习 + 计时）
@@ -184,7 +185,7 @@ CI 每次推送都跑第一个门禁；第二个会真的访问 B 站接口，�
 
 ## 隐私
 
-本仓库不含 Cookie、账号 ID、会话令牌或本机绝对路径。提交历史使用 GitHub noreply 邮箱。
+本仓库不含 Cookie、账号 ID、会话令牌或本机绝对路径；也不含学到的知识卡片、生成的技能、查询索引（`bili.sqlite`）或向量库（`*.jsonl`、`vec0.*`）——那些都属于使用者本机，`tests/repo-hygiene.mjs` 在 CI 里断言这条。提交历史使用 GitHub noreply 邮箱。
 `.gitignore` 已覆盖 `cookie.txt`、`**/bili-kb/`（样例目录除外）、`.out/`、`*.log`。
 
 ## 许可
