@@ -45,6 +45,21 @@ for (const f of files.filter((p) => p.endsWith('.json') && !exempt(p))) {
   } catch { /* 读不到就算了 */ }
 }
 
+// BV 号哨兵：仓库不该记录「谁学过哪些视频」。只允许最初版合成样例、BVDEMO 占位符、文档里的 x 占位符。
+const ALLOWED_BV = new Set(['BV1tRxt68EZa']);
+const fakeBv = (id) => /^BVDEMO\d{6}$/.test(id) || /x{6}/i.test(id);
+const seenBv = new Set();
+for (const f of files.filter((p) => /\.(js|mjs|py|md|json|yml|txt)$/.test(p))) {
+  try {
+    const t = fs.readFileSync(f, 'utf8');
+    for (const m of t.matchAll(/\bBV[0-9A-Za-z]{10}\b/g)) {
+      if (ALLOWED_BV.has(m[0]) || fakeBv(m[0]) || seenBv.has(`${f}|${m[0]}`)) continue;
+      seenBv.add(`${f}|${m[0]}`);
+      fails.push(`${f} 里有真实 BV 号 ${m[0]}——学过哪些视频属于使用者，换成 BVDEMO000020`);
+    }
+  } catch { /* 读不到就算了 */ }
+}
+
 console.log(`repo-hygiene：扫了 ${files.length} 个被跟踪文件`);
 if (fails.length) {
   console.log(`FAIL repo-hygiene（${fails.length} 条）：`);
