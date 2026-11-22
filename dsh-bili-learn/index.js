@@ -17,6 +17,7 @@ import { pollQrLogin, renderQrPng, startQrLogin, whoami, writeCookieFile } from 
 import { clusterByPrefix, collectionEpisodes, listCollections, seasonOfVideo } from './lib/series.js';
 import { fetchSubtitlesWithYtDlp, parseSubtitleFile } from './lib/subs.js';
 import { clip, formatTime, parseTranscriptText, segmentTranscript, topTerms } from './lib/text.js';
+import { rrfFusion } from './lib/vec.js';
 
 export const inject = ['tools'];
 
@@ -31,6 +32,11 @@ const DEFAULTS = {
   // 取帧：留空则自动找 PATH 上的 ffmpeg 或 python imageio-ffmpeg 自带的二进制。
   ffmpeg: '',
   frameQuality: 32,
+  // 语义检索（可选）。查询侧默认找本机 embedding 服务（tools/embed.py serve）；
+  // 把 sqlite-vec 的 vec0 扩展丢进 kbDir 就自动启用 ANN，没丢就用精确暴力扫（几千~几万条都是精确且几毫秒）。
+  embedModel: 'bge-small-zh-v1.5',
+  embedUrl: 'http://127.0.0.1:10099',
+  vecExtPath: '',
   // 生成技能写到这里（留空 = <kbDir>/../skills，即 ~/.dsh/skills）。
   skillsDir: '',
   cookiesFromBrowser: '',
@@ -91,7 +97,14 @@ const TOOL_TEXT = (value) => [{ type: 'text', text: typeof value === 'string' ? 
 
 export function apply(ctx, config) {
   const cfg = { ...DEFAULTS, ...(config ?? {}) };
-  const kb = new KnowledgeBase(cfg.kbDir || defaultKbRoot(), { engine: cfg.sqliteIndex === false ? 'json' : 'auto' });
+  const kbRoot = cfg.kbDir || defaultKbRoot();
+  const autoVec = cfg.vecExtPath || (['vec0.dll', 'vec0.so', 'vec0.dylib'].map((n) => path.join(kbRoot, n)).find((p) => fs.existsSync(p)) ?? '');
+  const kb = new KnowledgeBase(kbRoot, {
+    engine: cfg.sqliteIndex === false ? 'json' : 'auto',
+    embedModel: cfg.embedModel ?? 'bge-small-zh-v1.5',
+    vecExtPath: autoVec,
+    embedUrl: cfg.embedUrl ?? 'http://127.0.0.1:10099',
+  });
   const disposers = [];
 
   /**
@@ -602,17 +615,37 @@ export function apply(ctx, config) {
           limit: { type: 'integer', description: '最多返回多少条（默认 8）' },
           with_lines: { type: 'boolean', description: '是否同时检索讲稿原文（默认 true）' },
           engine: { type: 'string', enum: ['auto', 'sql', 'json'], description: 'auto=有 SQLite 索引就走索引（默认）；sql/json 用来强制对比两条路' },
+          mode: { type: 'string', enum: ['keyword', 'semantic', 'mixed'], description: 'keyword=关键词（默认，行为与以前完全一致）；semantic=只用语义向量（补关键词盲区，如「画幅比例」命不中「9:16」）；mixed=两路候选用倒数排名融合，仍不改关键词那一路的打分口径' },
         },
         required: ['query'],
       },
       output: { schema: { type: 'object' }, render: (_args, value) => TOOL_TEXT(value) },
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const hits = kb.search(args.query, { bvid: args.bvid, series: args.series, limit: Number(args.limit ?? 8), withLines: args.with_lines !== false, engine: args.engine ?? 'auto' });
+        const limit = Number(args.limit ?? 8);
+        const mode = args.mode ?? 'keyword';
+        const hits = kb.search(args.query, { bvid: args.bvid, series: args.series, limit, withLines: args.with_lines !== false, engine: args.engine ?? 'auto' });
+        let vec = { ok: mode === 'keyword', reason: '', cards: [], engine: '', note: '' };
+        if (mode !== 'keyword') vec = await kb.vecSearch(args.query, { limit });
+        let merged = hits.cards;
+        if (mode === 'semantic') merged = vec.ok ? vec.cards : [];
+        else if (mode === 'mixed') {
+          if (vec.ok) {
+            const byKey = new Map();
+            for (const c of [...hits.cards, ...vec.cards]) byKey.set(`${c._video.bvid}|${c._video.page ?? 1}|${c.id}`, c);
+            const ref = (c) => ({ bvid: c._video.bvid, page: c._video.page ?? 1, cid: c.id });
+            merged = rrfFusion([hits.cards.map(ref), vec.cards.map(ref)], limit)
+              .map((r) => byKey.get(`${r.bvid}|${r.page}|${r.cid}`))
+              .filter(Boolean);
+          } else merged = hits.cards; // 语义路坏了就退回关键词，绝不因为向量坏了而少答
+        }
+        hits.cards = merged;
         const empty = hits.cards.length === 0 && hits.lines.length === 0;
         return {
           ok: true,
           query: args.query,
+          mode,
+          vec: mode === 'keyword' ? undefined : { ok: vec.ok, engine: vec.engine, note: vec.note, reason: vec.reason },
           engine: hits.engine ?? 'json',
           cards: hits.cards.map((c) => ({
             id: c.id,
@@ -869,9 +902,10 @@ export function apply(ctx, config) {
         type: 'object',
         additionalProperties: false,
         properties: {
-          action: { type: 'string', enum: ['status', 'rebuild', 'verify'], description: 'status=体检；rebuild=重建；verify=双跑比对' },
+          action: { type: 'string', enum: ['status', 'rebuild', 'verify', 'vector'], description: 'status=体检；rebuild=重建；verify=双跑比对；vector=语义向量层体检（带 file 参数就把 embedding 结果灌进索引）' },
           queries: { type: 'array', items: { type: 'string' }, description: 'verify 用哪些查询；不给就自动从卡片结论里取样' },
           limit: { type: 'integer', description: 'verify 取样查询数（默认 12）' },
+          file: { type: 'string', description: 'vector 用：embedding 输出的 jsonl 路径（python tools/embed.py cards 产出）' },
         },
         required: ['action'],
       },
@@ -881,6 +915,24 @@ export function apply(ctx, config) {
         kb.ensure();
         const action = args.action ?? 'status';
         if (action === 'status') return { ok: true, ...kb.indexStatus(), note: 'consistent=false 时先 action=rebuild。' };
+        if (action === 'vector') {
+          if (args.file) {
+            const r = kb.vecApplyJsonl(args.file);
+            return { ok: r.ok, applied: r.applied, bad: r.bad, dim: r.dim, model: r.model, vtable: r.vtable, note: '向量是派生缓存，灌进来不动 JSON；剩下的陈旧向量按 pending 列表再嵌一轮。' };
+          }
+          const st = kb.vecStatus();
+          const pend = kb.vecPending();
+          return {
+            ok: st.ok,
+            ...st,
+            pending: pend.total ?? 0,
+            pendingSample: (pend.items ?? []).slice(0, 5).map((i) => ({ bvid: i.bvid, page: i.page, cid: i.cid, text: i.text.slice(0, 60) })),
+            how: st.rows === 0 || (pend.total ?? 0) > 0
+              ? ['python tools/embed.py cards --in <待嵌.jsonl> --out <向量.jsonl>', 'bili_index {action:"vector", file:"<向量.jsonl>"}', 'python tools/embed.py serve --port 10099（查询侧常驻，闲置自动退出）']
+              : '向量已是最新；查询侧需要 python tools/embed.py serve --port 10099 常驻',
+            note: '语义检索只是多出的一路候选：默认 mode=keyword 行为不变；mixed 用倒数排名融合，ANN 与精确暴力不一致时以精确为准。',
+          };
+        }
         if (action === 'rebuild') {
           const t0 = Date.now();
           const r = kb.rebuildIndex();

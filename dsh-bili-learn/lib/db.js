@@ -91,11 +91,12 @@ function bindNum(value) {
 }
 
 export class IndexDb {
-  constructor(root) {
+  constructor(root, { allowExtension = false } = {}) {
     this.file = path.join(root, 'bili.sqlite');
     this.db = null;
     this.ok = false;
     this.reason = DatabaseSync ? '' : `node:sqlite 不可用：${sqliteError}`;
+    this.allowExtension = allowExtension;
   }
 
   open() {
@@ -103,7 +104,8 @@ export class IndexDb {
     if (!DatabaseSync) return null;
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      this.db = new DatabaseSync(this.file);
+      // 只有配了 vecExtPath 才开扩展加载：默认关，别给索引层多一个能力面
+      this.db = new DatabaseSync(this.file, { allowExtension: Boolean(this.allowExtension) });
       this.db.exec('PRAGMA journal_mode=WAL');
       this.db.exec('PRAGMA busy_timeout=5000');
       this.db.exec(SCHEMA);

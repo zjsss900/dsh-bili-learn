@@ -105,7 +105,26 @@ B 站教程里混着求三连、加群领资料、卖课优惠、片尾致谢，
 - 中文必须用 **bigram 灌 `fts5(tokenize='unicode61')`**：`trigram` 对「景别」「轴线」这类两字词完全不命中（实测 0 条）。
 - 依赖为零：Node ≥ 22.5 自带 `node:sqlite`（FTS5 可用）；不可用时自动退回 JSON 路线，`sqliteIndex: false` 可整体关掉。
 
-验收（真实库，不是合成数据）：`node tests/db-verify.mjs` → 60 个查询（含中英混排、专有名词）卡片 top8 **逐条一致、顺序一致、漏 0 条**；讲稿行 5 组一致；跨页待复习列表一致；整体 17.8× 提速。`bili_index action=verify` 把同样的双跑做成随手可跑的工具调用。
+验收（真实库，不是合成数据）：`node tests/db-verify.mjs` → 60 个查询（含中英混排、专有名词）卡片 top8 **逐条一致、顺序一致、漏 0 条**；讲稿行 5 组一致；跨页待复习列表一致；整体约 10× 提速（17.8× 是修 id 撞车之前的数，现在的数以 `node tests/db-verify.mjs` 当场打印为准）。`bili_index action=verify` 把同样的双跑做成随手可跑的工具调用。
+
+## 语义检索：补关键词的盲区（可选，默认关）
+
+关键词答不出的自然语言需求，语义能答：实测「出图的时候画幅比例怎么选」关键词**答不出**，语义首位给出「角色用 9:16，场景用 16:9」（这条卡里根本没有「画幅比例」四个字）。
+
+三条底线和全文索引一样：**向量是可丢弃的派生缓存**（JSON 才是真相源，删了能重建）、**语义只多出一路候选**（默认 `mode=keyword`，行为与以前逐字节一致），**ANN 不做终判**（vec0 与精确暴力不一致时以精确为准，实测 10/10 一致）。
+
+前提是本机跑得动 embedding（不需要 GPU，实测 CPU 全库 1786 张卡 42 秒）：
+
+```bash
+# 1) 模型：BAAI/bge-small-zh-v1.5（91 MB，512 维）。huggingface 连不上就用 ModelScope 直接拉文件
+#    放到 ~/.dsh/models/bge-small-zh-v1.5/（config.json / tokenizer.json / vocab.txt / pytorch_model.bin）
+python tools/embed.py selftest                       # 门禁：查询里没有共同词的例子，期望卡要在 top3
+python tools/embed.py cards --in 待嵌.jsonl --out 向量.jsonl   # 批量嵌（bili_index action=vector 会告诉你待嵌清单）
+python tools/embed.py serve --port 10099             # 查询侧常驻，闲置 900 秒自杀，不泄漏进程
+```
+
+插件侧：`bili_index {action:"vector"}` 看待嵌/灌入/体检；`bili_recall {mode:"semantic"|"mixed"}` 用语义或倒数排名融合。
+配置项 `embedModel` / `embedUrl` / `vecExtPath`；把 sqlite-vec 的 `vec0.dll` 丢进 kbDir 就自动启用 ANN，没丢就用精确暴力扫（几千到几万条都是精确且几毫秒）。
 
 ## 安装
 
@@ -166,11 +185,13 @@ examples/bili-kb/BV1tRxt68EZa/
 ## 测试
 
 ```bash
-node tests/selftest.mjs   # PASS 87 checks   纯函数与知识库门禁（系列进度、多 P 互不覆盖、质检记账与回滚、索引层两条路一致、索引陈旧自愈、卡片 id 撞车改名保留）
+node tests/selftest.mjs   # PASS 94 checks   纯函数与知识库门禁（系列进度、多 P 互不覆盖、质检记账与回滚、索引层两条路一致、索引陈旧自愈、卡片 id 撞车改名保留、语义向量层接线）
 node tests/tool-test.mjs  # PASS 12 tools    用假 ctx 驱动 12 个真实工具，验证输出无损
 node tests/db-smoke.mjs   # PASS 22 checks   索引层冒烟：建/镜像/增量/重建/删掉后自动回退 JSON、指纹发现外部写入
 node tests/fix-dup-ids.mjs # 修历史数据：一页内卡片 id 撞车的改名保留两张，顺手重建索引（0.5.2 及之前学到的库可能需要）
 node tests/db-verify.mjs  # 可选：拿你自己的知识库做双跑验收（卡片逐条一致 + 讲稿行 + 待复习 + 计时）
+python tools/embed.py selftest  # embedding 质量门禁：查询不带卡片用词，期望卡仍排进 top3
+node tests/vec-verify.mjs # 可选：真库语义验收（全库嵌入、语义 vs 关键词、ANN 与精确暴力一致）
 node tests/relearn.mjs    # 可选：只重跑 status=unread 的段（补提取，按 id 去重追加）
 node tests/judge-live.mjs # 可选：真模型 + 你自己的知识库，验收判定质量（只写缓存，不动卡片）
 ```

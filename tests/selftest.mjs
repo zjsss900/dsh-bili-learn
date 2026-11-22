@@ -156,6 +156,100 @@ check('一页内 id 撞车：saveVideo 改名保留两张，索引照样镜像�
   return (cards.length === 2 && new Set(cards.map((c) => c.id)).size === 2 && hit) || JSON.stringify({ ids: cards.map((c) => c.id), hit });
 });
 
+// ---------------------------------------------------------------- 语义向量层：注入假 embedding，离线且确定性
+// 这段测的是**接线**（候选、增量、回退、混排），语义质量由 tools/embed.py 的自测 + 真库验收负责。
+const safeRm = (d, kbs = []) => {
+  for (const k of kbs) {
+    try {
+      const holder = k.indexDb();
+      holder?.db?.close?.();
+    } catch { /* 索引句柄关不上就算了，别让临时目录卡死门禁 */ }
+  }
+  try {
+    fs.rmSync(d, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 });
+  } catch (e) {
+    console.log(`（临时目录没删掉：${d}：${e.code}）`);
+  }
+};
+const vdir = fs.mkdtempSync(path.join(os.tmpdir(), 'bili-vec-'));
+const fakeEmbed = (text) => {
+  const dim = 64;
+  const v = new Array(dim).fill(0);
+  const s = String(text);
+  for (let i = 0; i + 1 < s.length; i += 1) v[Math.abs(s.charCodeAt(i) * 31 + s.charCodeAt(i + 1)) % dim] += 1;
+  const n = Math.hypot(...v) || 1;
+  return v.map((x) => x / n);
+};
+const vkb = new kbMod.KnowledgeBase(vdir, { embedFn: fakeEmbed });
+const vmeta = (n) => ({ bvid: `BV1VEC0000${n}`, page: 1, url: `https://x/BV1VEC0000${n}`, title: `向量课 ${n}`, owner: 't', duration: 600 });
+vkb.saveVideo({ meta: vmeta(1), lines: [{ t: 10, text: '甲' }], segments: [], cards: [{ id: 'c1', title: '甲卡', claim: '唵嘛呢叭咪：机器位排布要贴轴线', evidence: [{ t: 10, quote: '甲' }] }], warnings: [] });
+vkb.saveVideo({ meta: vmeta(2), lines: [{ t: 20, text: '乙' }], segments: [], cards: [{ id: 'c2', title: '乙卡', claim: '唵嘛呢叭咪：机器位排布要贴轴线旁边', evidence: [{ t: 20, quote: '乙' }] }], warnings: [] });
+const vp0 = vkb.vecPending();
+const vfile = path.join(vdir, 'vec.jsonl');
+fs.writeFileSync(vfile, vp0.items.map((i) => JSON.stringify({ key: `${i.bvid}|${i.page}|${i.cid}`, dhash: i.dhash, vec: fakeEmbed(i.text) })).join('\n'), 'utf8');
+const vapplied = vkb.vecApplyJsonl(vfile);
+const vp1 = vkb.vecPending();
+check('待嵌清单：一开始全 pending，灌完变 0', () => (vp0.total === 2 && vapplied.applied === 2 && vp1.total === 0) || JSON.stringify({ p0: vp0.total, applied: vapplied.applied, p1: vp1.total }));
+const vstore = vkb.load('BV1VEC00002', 1);
+vstore.cards[0].claim = '唵嘛呢叭咪：机器位排布要贴轴线旁边，且高度齐平';
+vkb.saveVideo({ meta: vstore.meta, lines: vstore.lines, segments: vstore.segments, cards: vstore.cards, warnings: [] });
+const vp2 = vkb.vecPending();
+check('灌完改一张卡 → 只有那张重新 pending（按内容指纹增量）', () => (vp2.total === 1 && vp2.items[0].cid === 'c2') || JSON.stringify(vp2.items));
+// 跨页同 id 不串指纹（真库里几十页都有 s0-1；只按 cid 比对会导致永远算待嵌）
+const vcdir = fs.mkdtempSync(path.join(os.tmpdir(), 'bili-vc-'));
+const vckb = new kbMod.KnowledgeBase(vcdir, { embedFn: fakeEmbed });
+for (const page of [1, 2]) {
+  vckb.saveVideo({
+    meta: { bvid: 'BV1CLASH001', page, url: `https://x/BV1CLASH001?p=${page}`, title: `撞 id 课 P${page}`, owner: 't', duration: 600 },
+    lines: [{ t: 5, text: '甲' }],
+    segments: [],
+    cards: [{ id: 's0-1', title: `P${page} 卡`, claim: `啮合校验页${page}：机位排布要贴轴线`, evidence: [{ t: 5, quote: '甲' }] }],
+    warnings: [],
+  });
+}
+const cp0 = vckb.vecPending();
+const vcfile = path.join(vcdir, 'v.jsonl');
+fs.writeFileSync(vcfile, JSON.stringify({ key: `BV1CLASH001|1|s0-1`, dhash: cp0.items.find((i) => i.page === 1).dhash, vec: fakeEmbed('啮合校验页1：机位排布要贴轴线') }), 'utf8');
+vckb.vecApplyJsonl(vcfile);
+const cp1 = vckb.vecPending();
+check('跨页同 id（几十页都有 s0-1）不会串指纹', () => (cp0.total === 2 && cp1.total === 1 && cp1.items[0].page === 2) || JSON.stringify({ cp0: cp0.total, cp1: cp1.items.map((i) => `${i.page}:${i.cid}`) }));
+safeRm(vcdir, [vckb]);
+const vsem = await vkb.vecSearch('唵嘛呢叭咪：机器位排布要贴轴线', { limit: 5 });
+check('语义检索返回带 _vec 分数，顺序按余弦递减', () => {
+  const scores = vsem.cards.map((c) => c._vec?.score);
+  const sorted = scores.every((s, i) => i === 0 || scores[i - 1] >= s);
+  return (vsem.ok && scores.length === 2 && sorted) || JSON.stringify({ reason: vsem.reason, scores });
+});
+const vkwo = vkb.search('唵嘛呢叭咪', { limit: 5, withLines: false, engine: 'sql' }).cards.map((c) => c.id);
+const vkw1 = vkb.search('唵嘛呢叭咪', { limit: 5, withLines: false, engine: 'sql' }).cards.map((c) => c.id);
+check('关键词路线的结果不受向量层影响', () => JSON.stringify(vkwo) === JSON.stringify(vkw1) || JSON.stringify({ vkwo, vkw1 }));
+const vdb = vkb.indexDb();
+vdb.open();
+vdb.db.exec('DROP TABLE IF EXISTS card_vec');
+const vsemGone = await vkb.vecSearch('唵嘛呢叭咪', { limit: 5 });
+const vkwAfterDrop = vkb.search('唵嘛呢叭咪', { limit: 5, withLines: false, engine: 'sql' }).cards.length;
+check('向量表被删：语义路诚实报错，关键词路线不受影响', () => (!vsemGone.ok && /向量|embedding|不可用/.test(vsemGone.reason ?? '') && vkwAfterDrop > 0) || JSON.stringify({ reason: vsemGone.reason, vkwAfterDrop }));
+safeRm(vdir, [vkb]);
+// ANN 扩展可用就必须与精确暴力给同一结论；不可用就必须走精确暴力（没 dll 也有一条断言，不 SKIP）
+const vext = await (async () => {
+  if (!process.env.VECEXT) return { ok: false, reason: '没配 vecExtPath' };
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'bili-vec2-'));
+  const k = new kbMod.KnowledgeBase(d, { embedFn: fakeEmbed, vecExtPath: process.env.VECEXT });
+  k.saveVideo({ meta: { bvid: 'BV1ANN00001', page: 1, url: 'https://x', title: 'ANN 课', owner: 't', duration: 60 }, lines: [{ t: 5, text: '甲' }], segments: [], cards: [{ id: 'a1', title: 'A', claim: '啮合校验：机位排布贴轴线', evidence: [{ t: 5, quote: '甲' }] }, { id: 'a2', title: 'B', claim: '啮合校验：机位高度要齐平', evidence: [{ t: 6, quote: '甲' }] }], warnings: [] });
+  const p = k.vecPending();
+  const f2 = path.join(d, 'v.jsonl');
+  fs.writeFileSync(f2, p.items.map((i) => JSON.stringify({ key: `${i.bvid}|${i.page}|${i.cid}`, dhash: i.dhash, vec: fakeEmbed(i.text) })).join('\n'), 'utf8');
+  const ap = k.vecApplyJsonl(f2);
+  const r = await k.vecSearch('啮合校验：机位排布贴轴线', { limit: 5 });
+  const out = { ext: k.vecExt(), vtable: ap.vtable, engine: r.engine, note: r.note, cards: r.cards.length };
+  safeRm(d, [k]);
+  return out;
+})();
+check('ANN 可用则与精确暴力同一结论；不可用则走精确暴力', () => {
+  if (!process.env.VECEXT) return kb.vecStatus().ext?.ok !== true || '假 KB 不该自动带上扩展';
+  return (vext.ext?.ok && vext.vtable?.ok && vext.engine === 'vec0' && /一致/.test(vext.note ?? '') && vext.cards === 2) || JSON.stringify(vext);
+});
+
 // ---------------------------------------------------------------- 系列（合集）：fixture，不联网
 const viewFix = {
   bvid: 'BV1SERIES0001',

@@ -105,7 +105,25 @@ Once the base grows to a few thousand cards, "scan every JSON file on each recal
 - Chinese needs **bigrams inside `fts5(tokenize='unicode61')`**: the `trigram` tokenizer returns zero hits for two-character terms such as 景别 or 轴线.
 - Zero dependencies: `node:sqlite` ships with Node ≥ 22.5 (FTS5 included); when unavailable everything falls back to JSON, and `sqliteIndex: false` turns the layer off entirely.
 
-Acceptance (real base, not synthetic): `node tests/db-verify.mjs` → 60 queries (mixed Chinese/English, proper nouns) return **identical top-8 cards, identical order, zero lost hits**; transcript-line groups identical on 5 queries; cross-page due lists identical; 17.8× faster overall. `bili_index action=verify` makes the same dual run a tool call you can fire any time.
+Acceptance (real base, not synthetic): `node tests/db-verify.mjs` → 60 queries (mixed Chinese/English, proper nouns) return **identical top-8 cards, identical order, zero lost hits**; transcript-line groups identical on 5 queries; cross-page due lists identical; roughly 10× faster overall (17.8× was measured before the id-collision fix; the current figure is what `node tests/db-verify.mjs` prints today). `bili_index action=verify` makes the same dual run a tool call you can fire any time.
+
+## Semantic recall: covering what keywords cannot (optional, off by default)
+
+Measured on this machine's library: for "how do I choose the aspect ratio when generating images" keyword search **misses**, while semantic search puts "characters 9:16, scenes 16:9" first — that card never contains the words "aspect ratio".
+
+Same three invariants as the full-text index: **vectors are a disposable derived cache** (JSON stays the source of truth; delete and rebuild any time), **semantic only adds one more candidate stream** (default `mode=keyword`, byte-for-byte the old behaviour), and **ANN never decides the ranking** (when vec0 and the exact scan disagree, exact wins — measured identical 10/10).
+
+You need a local embedder (no GPU required: 1786 cards embedded in 42 s on CPU):
+
+```bash
+# model: BAAI/bge-small-zh-v1.5 (91 MB, 512-dim). huggingface.co is blocked here; ModelScope works.
+# put config.json / tokenizer.json / vocab.txt / pytorch_model.bin into ~/.dsh/models/bge-small-zh-v1.5/
+python tools/embed.py selftest                              # gate: queries sharing no words with the cards, expected card within top-3
+python tools/embed.py cards --in pending.jsonl --out vectors.jsonl
+python tools/embed.py serve --port 10099                    # query-side server, self-exits after 900 s idle
+```
+
+Plugin side: `bili_index {action:"vector"}` shows pending cards, applies a jsonl, reports health; `bili_recall {mode:"semantic"|"mixed"}` uses semantic or reciprocal-rank fusion. Config: `embedModel`, `embedUrl`, `vecExtPath` — drop sqlite-vec's `vec0.dll` into the kbDir to enable ANN, otherwise an exact scan runs (exact, and a few ms at thousands to tens of thousands of cards).
 
 ## Install
 
@@ -166,11 +184,13 @@ examples/bili-kb/BV1tRxt68EZa/
 ## Tests
 
 ```bash
-node tests/selftest.mjs   # PASS 87 checks   pure functions and knowledge-base gates (series progress, per-page isolation, judgment bookkeeping + rollback, index-layer parity, stale-index self-heal, colliding card ids renamed)
+node tests/selftest.mjs   # PASS 94 checks   pure functions and knowledge-base gates (series progress, per-page isolation, judgment bookkeeping + rollback, index-layer parity, stale-index self-heal, colliding card ids renamed, semantic vector layer wiring)
 node tests/tool-test.mjs  # PASS 12 tools    drives the real tools with a fake ctx, checks lossless output
 node tests/db-smoke.mjs   # PASS 22 checks   index layer smoke: build / mirror / incremental / rebuild / fallback after deletion / external-write detection
 node tests/fix-dup-ids.mjs # repairs history: renames colliding card ids within a page (both cards kept), then rebuilds the index (needed for libraries learned on 0.5.2 or earlier)
 node tests/db-verify.mjs  # optional: dual-run acceptance against your own knowledge base
+python tools/embed.py selftest  # embedding gate: queries sharing no words with the cards still rank the expected card in top-3
+node tests/vec-verify.mjs # optional: real-base semantic acceptance (embed all cards, semantic vs keyword, ANN == exact scan)
 node tests/relearn.mjs    # optional: re-distill only the segments stuck at status=unread
 node tests/judge-live.mjs # optional: real model + your own knowledge base, verdict cache only, never touches cards
 ```

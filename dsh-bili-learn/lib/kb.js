@@ -4,6 +4,7 @@ import path from 'node:path';
 import { formatTime, scoreCard, searchLines, tokenize, topTerms, clip } from './text.js';
 import { applyVerdicts } from './judge.js';
 import { IndexDb, rebuildIndex } from './db.js';
+import { tryLoadExt, vecStats, pendingItems, upsertVectors, bruteSearch, rebuildVTable, annSearch, fingerprint, embedText, VEC_VTABLE } from './vec.js';
 
 const INDEX_VERSION = 1;
 // 复习间隔（天），下标即熟练度。
@@ -65,10 +66,11 @@ function readJsonSafe(file, fallback) {
 }
 
 export class KnowledgeBase {
-  constructor(root, { engine = 'auto' } = {}) {
+  constructor(root, { engine = 'auto', embedModel = 'bge-small-zh-v1.5', vecExtPath = '', embedUrl = '', embedFn = null } = {}) {
     this.root = root;
     // 'auto' = 有 SQLite 索引就走索引；'json' = 按配置彻底关掉索引层
     this.engineDefault = engine;
+    this.vecCfg = { embedModel, vecExtPath, embedUrl, embedFn };
   }
 
   ensure() {
@@ -102,7 +104,7 @@ export class KnowledgeBase {
    * node:sqlite 不可用（老运行时/被禁用）时返回 null，所有查询自动走 JSON 路线。
    */
   indexDb() {
-    if (this._db === undefined) this._db = new IndexDb(this.root);
+    if (this._db === undefined) this._db = new IndexDb(this.root, { allowExtension: Boolean(this.vecCfg?.vecExtPath) });
     return this._db;
   }
 
@@ -198,6 +200,136 @@ export class KnowledgeBase {
       if (db?.open()) db.metaSet('stamp', this.jsonStamp());
     }
     return r;
+  }
+
+  // ---------------------------------------------------------------- 语义检索
+  // 向量是**派生缓存**：和全文索引一样可删可重建，坏了只回退关键词路线，绝不动 JSON 里的知识。
+
+  vecEmbedModel() {
+    return String(this.vecCfg.embedModel ?? '');
+  }
+  vecExt() {
+    const db = this.indexDb();
+    if (!db?.open()) return { ok: false, reason: 'node:sqlite 不可用' };
+    if (!this._vecExt) this._vecExt = tryLoadExt(db.db, this.vecCfg.vecExtPath);
+    return this._vecExt;
+  }
+  vecStatus() {
+    const db = this.indexDb();
+    if (!db?.open()) return { ok: false, reason: 'node:sqlite 不可用' };
+    const model = this.vecEmbedModel();
+    const st = vecStats(db.db);
+    const mine = st.models.find((m) => m.model === model) ?? { rows: 0, dim: 0 };
+    return {
+      ok: true,
+      model,
+      rows: mine.rows,
+      dim: mine.dim ?? 0,
+      otherModels: st.models.filter((m) => m.model !== model).map((m) => m.model),
+      ext: this.vecExt(),
+      vtable: Boolean(db.db.prepare("SELECT name FROM sqlite_master WHERE name = ?").get(VEC_VTABLE)),
+      embedUrl: this.vecCfg.embedUrl || '',
+      embedFn: typeof this.vecCfg.embedFn === 'function',
+    };
+  }
+  /** 把 JSON 里的卡片摊平成待嵌条目（内容指纹变了才重嵌） */
+  vecItems() {
+    const out = [];
+    for (const e of this.listVideos()) {
+      const store = this.load(e.bvid, e.page ?? 1);
+      for (const c of store?.cards ?? []) {
+        out.push({ bvid: e.bvid, page: e.page ?? 1, cid: String(c.id), dhash: fingerprint(c), text: embedText(c) });
+      }
+    }
+    return out;
+  }
+  vecPending() {
+    const db = this.indexDb();
+    if (!db?.open()) return { ok: false, reason: 'node:sqlite 不可用', items: [] };
+    const items = pendingItems(db.db, this.vecItems(), this.vecEmbedModel());
+    return { ok: true, items, total: items.length };
+  }
+  /** python 侧 embed.py 写出的 jsonl → 灌进索引；每行 {key:"bvid|page|cid", dhash, vec} */
+  vecApplyJsonl(file) {
+    const db = this.indexDb();
+    if (!db?.open()) return { ok: false, reason: 'node:sqlite 不可用' };
+    const model = this.vecEmbedModel();
+    const rows = [];
+    let dim = 0;
+    let bad = 0;
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let o;
+      try {
+        o = JSON.parse(line);
+      } catch {
+        bad += 1;
+        continue;
+      }
+      const [bvid, page, cid] = String(o.key ?? '').split('|');
+      if (!bvid || !cid || !Array.isArray(o.vec)) {
+        bad += 1;
+        continue;
+      }
+      dim = o.vec.length;
+      rows.push({ bvid, page: Number(page ?? 1), cid, dhash: o.dhash, vec: o.vec });
+    }
+    const applied = upsertVectors(db.db, { model, dim, rows });
+    let vtable = { ok: false, reason: '没启用 vec0' };
+    if (this.vecExt().ok && applied > 0) {
+      const all = db.db.prepare('SELECT bvid,page,cid,dhash,vec FROM card_vec WHERE model = ?').all(model)
+        .map((r) => ({ bvid: r.bvid, page: r.page, cid: r.cid, vec: [...new Float32Array(r.vec.buffer, r.vec.byteOffset, Math.floor(r.vec.byteLength / 4))] }));
+      vtable = rebuildVTable(db.db, { dim, rows: all.map((r, i) => ({ ...r, model })), name: VEC_VTABLE });
+    }
+    return { ok: applied > 0, applied, bad, dim, model, vtable };
+  }
+  async vecEmbed(text) {
+    if (typeof this.vecCfg.embedFn === 'function') return { ok: true, vec: this.vecCfg.embedFn(String(text)) };
+    const url = this.vecCfg.embedUrl;
+    if (!url) return { ok: false, reason: '没配 embedUrl（本地 embedding 服务地址），语义检索不可用' };
+    try {
+      const r = await fetch(url.replace(/\/$/, '') + '/embed', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ texts: [String(text)], query: true }),
+      });
+      const j = await r.json();
+      if (!r.ok || !Array.isArray(j.vecs) || j.vecs.length === 0) return { ok: false, reason: `embedding 服务报错：${j?.reason ?? r.status}` };
+      return { ok: true, vec: j.vecs[0] };
+    } catch (e) {
+      return { ok: false, reason: `连不上 embedding 服务（${e?.message ?? e}）；先跑 python tools/embed.py serve` };
+    }
+  }
+  /** 语义召回：默认精确暴力扫（几千到几万条都是精确且几毫秒）；vec0 可用时走 ANN 并与之比对 */
+  async vecSearch(query, { limit = 8 } = {}) {
+    const db = this.indexDb();
+    if (!db?.open()) return { ok: false, reason: 'node:sqlite 不可用', cards: [] };
+    const model = this.vecEmbedModel();
+    const mine = vecStats(db.db).models.find((m) => m.model === model);
+    if (!mine?.rows) return { ok: false, reason: `这个库还没有 ${model} 的向量；先跑 embedding 再 bili_index vector`, cards: [] };
+    const q = await this.vecEmbed(query);
+    if (!q.ok) return { ok: false, reason: q.reason, cards: [] };
+    const brute = bruteSearch(db.db, { model, qvec: q.vec, k: limit, dim: mine.dim });
+    let engine = 'brute';
+    let hits = brute;
+    let annNote = '';
+    if (this.vecExt().ok && db.db.prepare('SELECT name FROM sqlite_master WHERE name = ?').get(VEC_VTABLE)) {
+      const ann = annSearch(db.db, { qvec: q.vec, k: limit, model, name: VEC_VTABLE });
+      if (ann.ok) {
+        engine = 'vec0';
+        const same = ann.hits.length === brute.length && ann.hits.every((h, i) => brute[i] && brute[i].cid === h.cid && brute[i].bvid === h.bvid);
+        annNote = same ? 'ANN 与精确暴力 top 完全一致' : `ANN 与精确暴力不一致（暴力为准）：ann=[${ann.hits.map((h) => h.cid)}] brute=[${brute.map((h) => h.cid)}]`;
+        hits = brute; // 口径唯一：ANN 只做加速，终判仍用精确结果
+      } else annNote = ann.reason;
+    }
+    const cards = [];
+    for (const h of hits) {
+      const store = this.load(h.bvid, h.page);
+      const card = (store?.cards ?? []).find((c) => String(c.id) === String(h.cid));
+      if (!card) continue; // 索引里有、JSON 里没有 → 陈旧缓存，跳过不答（与全文索引同一处理）
+      cards.push({ ...card, bvid: h.bvid, page: h.page, _video: { bvid: h.bvid, page: h.page, title: store.meta?.title ?? '', url: store.meta?.url ?? '' }, _vec: { score: Number(h.score.toFixed(4)) } });
+    }
+    return { ok: true, engine, note: annNote, model, dim: mine.dim, cards };
   }
 
   /** 索引与 JSON 是否一致（数量比对，给 verify 用）。 */
