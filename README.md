@@ -107,6 +107,12 @@ Once the base grows to a few thousand cards, "scan every JSON file on each recal
 
 Acceptance (real base, not synthetic): `node tests/db-verify.mjs` → 60 queries (mixed Chinese/English, proper nouns) return **identical top-8 cards, identical order, zero lost hits**; transcript-line groups identical on 5 queries; cross-page due lists identical; 17.8× faster overall. `bili_index action=verify` makes the same dual run a tool call you can fire any time.
 
+> **Want semantic recall** (so "how do I pick the aspect ratio" also hits the card that says "9:16")? That line needs
+> torch + transformers plus a 91 MB Chinese embedding model, which not every machine has — so it lives on the
+> **`semantic-vector` branch** (tag `v0.6.0-semantic`) and the main line keeps **zero Python dependencies**.
+> `git clone -b semantic-vector …`; the knowledge base format is identical on both lines — the branch only adds
+> `mode:semantic|mixed` and a disposable vector cache, and the default path is still keyword search.
+
 ## Install
 
 1. Put `dsh-bili-learn/` into your DSH plugin directory (or install it through the plugin manager). The plugin registers itself via `cordis.patch.yml`; startup-scoped profiles need a restart.

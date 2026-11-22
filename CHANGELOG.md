@@ -3,6 +3,20 @@
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，版本号遵循
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 版本分线（重要）
+
+- **`main` = 纯 SQLite 线（当前 0.5.3）**：只要 Node 22+（自带 `node:sqlite`），**零 Python、零 torch、零模型**。
+  候选召回、增量镜像、陈旧自愈、卡片质检、系列学习都在这条线上；真库实测 60 查询 9.4× 提速、top8 逐条一致、漏 0。
+- **`semantic-vector` 分支（tag `v0.6.0-semantic`）= 语义检索线**：需要本机有 torch + transformers
+  加一个中文 embedding 模型（`bge-small-zh-v1.5`，91 MB）——不是每台机器都装得起，所以不并进主线。
+  语义只多出一路候选（默认 `mode=keyword` 与主线行为一致），向量同样是**可丢弃的派生缓存**，ANN 不做终判。
+  ```bash
+  git clone -b semantic-vector https://github.com/zjsss900/dsh-bili-learn.git
+  ```
+- 两个钉死的位置，谁也丢不了：`v0.5.3-pure-sqlite`（纯 SQLite）、`v0.6.0-semantic`（语义版）。
+  两边**知识库格式完全一致**（JSON 是真相源），分支只多出 `bili_recall mode:semantic|mixed`、`bili_index action=vector`
+  和 `card_vec` 向量缓存；主线删掉 `bili.sqlite` 或分支删掉向量表都不影响知识本体。
+
 ## [0.5.3] - 2026-11-22
 
 ### 修复 / Fixed

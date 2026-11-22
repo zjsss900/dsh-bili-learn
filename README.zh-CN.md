@@ -107,6 +107,11 @@ B 站教程里混着求三连、加群领资料、卖课优惠、片尾致谢，
 
 验收（真实库，不是合成数据）：`node tests/db-verify.mjs` → 60 个查询（含中英混排、专有名词）卡片 top8 **逐条一致、顺序一致、漏 0 条**；讲稿行 5 组一致；跨页待复习列表一致；整体 17.8× 提速。`bili_index action=verify` 把同样的双跑做成随手可跑的工具调用。
 
+> **想要语义检索**（「出图时画幅比例怎么选」也能命中写着「9:16」的那张卡）？那条线需要本机有 torch + transformers
+> 加一个 91 MB 的中文 embedding 模型，不是人人都有，所以它在 **`semantic-vector` 分支**（tag `v0.6.0-semantic`），
+> 主线保持**零 Python 依赖**。`git clone -b semantic-vector …`；两边知识库格式完全一样，分支只多出 `mode:semantic|mixed`
+> 与一份可丢弃的向量缓存，默认口径仍是关键词。
+
 ## 安装
 
 1. 把 `dsh-bili-learn/` 放进 DSH 的插件目录（或通过插件管理安装）。插件通过 `cordis.patch.yml` 注册，启动期配置需要重启生效。
