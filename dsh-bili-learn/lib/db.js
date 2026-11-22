@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 
 /** 系列列只存 key（season:xxx / series:xxx），别把整个 series 对象塞进 SQL。
  *  node:sqlite 绑定严格：对象/数组直接报 "cannot be bound to SQLite parameter"，
- *  实测因为 BV1SERIES0001 的 series 是对象，整页卡片静默漏索引（现已收口 + 门禁盯着）。
+ *  实测因为 BVDEMO000031 的 series 是对象，整页卡片静默漏索引（现已收口 + 门禁盯着）。
  */
 function seriesKeyOf(value) {
   if (!value) return null;

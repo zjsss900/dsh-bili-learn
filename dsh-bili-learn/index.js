@@ -253,7 +253,30 @@ export function apply(ctx, config) {
         const warnings = [];
         const bili = client();
         const ref = parseVideoRef(args.url);
-        const meta = await bili.view(ref, { signal: exec.signal });
+        let meta;
+        try {
+          meta = await bili.view(ref, { signal: exec.signal });
+        } catch (error) {
+          // 元数据接口会失败：限流、稿件不存在、断网。用户手上已有讲稿时别把它扔掉——
+          // 用占位元数据继续学；没给讲稿就如实返回失败。绝不把异常抛给宿主：
+          // 一次网络失败不该变成一次崩溃，更不该动到知识库里的东西。
+          if (!args.transcript_text && !args.transcript_path) {
+            return {
+              ok: false,
+              bvid: ref.bvid ?? '',
+              url: args.url,
+              error: `元数据读取失败：${error.message}`,
+              warnings: ['元数据接口失败，未对知识库做任何改动。稍后重试，或直接传 transcript_path / transcript_text。'],
+            };
+          }
+          warnings.push(`元数据接口失败（${error.message}），改用占位元数据继续——讲稿是你提供的，不受影响`);
+          const id = ref.bvid ?? String(args.url).slice(0, 24);
+          meta = {
+            bvid: id, aid: 0, cid: 0, title: id, owner: '', duration: 0, pubdate: 0,
+            stat: {}, tags: [], description: '',
+            pages: [{ index: 1, cid: 0, part: '', page: 1 }],
+          };
+        }
         const pageIndex = Number(args.page ?? parsePageIndex(args.url) ?? 1) || 1;
         const page = meta.pages.find((p) => p.index === pageIndex) ?? meta.pages[0];
         if (!page) throw new Error(`${meta.bvid} 没有可用分 P`);

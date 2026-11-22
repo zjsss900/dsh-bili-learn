@@ -5,21 +5,39 @@
 
 ## 版本分线（重要）
 
-- **`main` = 纯 SQLite 线（当前 0.5.3）**：只要 Node 22+（自带 `node:sqlite`），**零 Python、零 torch、零模型**。
+- **`main` = 纯 SQLite 线（当前 0.5.4）**：只要 Node 22+（自带 `node:sqlite`），**零 Python、零 torch、零模型**。
   候选召回、增量镜像、陈旧自愈、卡片质检、系列学习都在这条线上；真库实测 60 查询 9.4× 提速、top8 逐条一致、漏 0。
-- **`semantic-vector` 分支（tag `v0.6.0-semantic`）= 语义检索线**：需要本机有 torch + transformers
+- **`semantic-vector` 分支（当前 0.6.1，tag `v0.6.1-semantic`）= 语义检索线**：需要本机有 torch + transformers
   加一个中文 embedding 模型（`bge-small-zh-v1.5`，91 MB）——不是每台机器都装得起，所以不并进主线。
   语义只多出一路候选（默认 `mode=keyword` 与主线行为一致），向量同样是**可丢弃的派生缓存**，ANN 不做终判。
   ```bash
   git clone -b semantic-vector https://github.com/zjsss900/dsh-bili-learn.git
   ```
-- 两个钉死的位置，谁也丢不了：`v0.5.3-pure-sqlite`（纯 SQLite）、`v0.6.0-semantic`（语义版）。
+- 钉死的位置，谁也丢不了：纯 SQLite 线 `v0.5.3-pure-sqlite`、`v0.5.4-pure-sqlite`；语义线 `v0.6.0-semantic`、`v0.6.1-semantic`。
   两边**知识库格式完全一致**（JSON 是真相源），分支只多出 `bili_recall mode:semantic|mixed`、`bili_index action=vector`
   和 `card_vec` 向量缓存；主线删掉 `bili.sqlite` 或分支删掉向量表都不影响知识本体。
 - **数据策略（两条线都适用）**：代码库只发代码加一份明确标注为合成的样例（`examples/`、`tests/fixtures/`）。
   学到的卡片、生成的技能、`bili.sqlite`、向量表与向量中间文件（`*.jsonl`、`vec0.*`）都属于使用者，**不进仓库**；
   已经提交过的那份样例技能已从**全部分支与全部历史**移除（`git filter-branch` + 强推，历史里 `git log --all -- skills` 为空，
   全历史最大 blob 只有 27 KB 的自检脚本）。`tests/repo-hygiene.mjs` 把这条变成断言，CI 每次都跑。
+
+## [0.5.4] - 2026-11-22
+
+### 修复 / Fixed
+
+- **元数据接口失败不再抛异常**（`bili_learn`）。限流、稿件不存在、断网都是常态：
+  给了 `transcript_text` / `transcript_path` 就用占位元数据继续学（告警里写清楚），没给就返回
+  `{ok:false, error, warnings}`——一次网络失败不该变成崩溃，更不该动到知识库。
+  以前这条会抛 `接口 code=-400`，宿主只能看到一次失败的工具调用。
+- **测试不再依赖真实稿件**：「拿不到讲稿」的用例改用一个不存在的稿件号（`BVDEMO000006`）与一份本地讲稿，
+  顺带断言「诚实失败不会在知识库里留下任何东西」。CI 因此更确定，也不再暴露作者学过哪些视频。
+
+### 安全与隐私 / Privacy
+
+- **仓库不再记录「谁学过什么」**：所有真实 BV 号、UP 主 mid、合集 id 已从**全部分支与全部历史**换成
+  `BVDEMOxxxxxx` 占位符（唯一保留的真实号是最初那份合成样例 `BV1tRxt68EZa`）。
+  `tests/repo-hygiene.mjs` 新增 BV 号规则：出现非占位、非样例的 `BV[0-9A-Za-z]{10}` 直接红。
+- 同步修掉夹具号被机械替换后两头不一致的问题（`_p2` 这类后缀当时没被替换）。
 
 ## [0.5.3] - 2026-11-22
 
